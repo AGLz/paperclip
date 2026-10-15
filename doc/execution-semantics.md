@@ -388,6 +388,45 @@ Concurrent compatibility decomposition attempts are therefore idempotent relativ
 
 ## 8. Non-Terminal Issue Liveness Contract
 
+### Routine-execution silent notify and disposition exhaustion
+
+Routine `notifyPolicy` is a typed field (`silent` | `alert` | `always`), not prose in
+`description`. **R1:** `silent` suppresses human notification only — every successful
+routine run must still record a terminal disposition. The run brief for `silent`
+routines always includes the override:
+
+> notify policy silent afeta apenas a notificação humana; registre sempre a disposição.
+
+Legacy descriptions that say `Notify policy: silent` are backfilled via
+`scripts/backfill-routine-notify-policy.sql`. See issue AGL-236 / plan AGL-199.
+
+**R2:** When a successful run ends without a disposition, the corrective
+`successful_run_missing_state` handoff prompt prepends an override *before* any
+quoted routine brief:
+
+> Você deve registrar uma disposição mesmo quando a política de notificação da rotina é silent.
+
+That override is mandatory when the source routine's typed `notifyPolicy` is
+`silent`. The stored routine brief is left intact — only the corrective wake
+instruction carries the override. See issue AGL-239.
+
+**R3:** When a `routine_execution` issue with typed `notifyPolicy === silent`
+exhausts the successful-run disposition handoff (`successful_run_missing_state`
+after the bounded corrective attempt) **and** the source run succeeded, Paperclip
+resolves the issue **`done`**, never `blocked`. Silent notify is not a waiting
+path. `blocked` still requires one of: a first-class blocker chain, a pending
+interaction/approval that names a responder, or an `unblockDescriptor` with
+`{owner, action}`. Alert/always routines keep the existing board escalation on
+exhaustion. See issue AGL-240.
+
+**R5:** A recovery action with `ownerType: board` that has **no** pending
+interaction or approval naming a human responder must not auto-retry on its own
+(the historical ~2 minute zombie loop). Paperclip applies a retry ceiling and
+expires the action with inspectable `recoveryBudget` evidence (`state:
+exhausted`, reason `board_without_named_responder`), clearing automatic
+wake/monitor paths. When a pending interaction or approval already names a
+responder, the current human-in-the-loop wait is preserved. See issue AGL-242.
+
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 
 This is a visibility contract, not an auto-completion contract. If Paperclip cannot safely infer the next action, it should surface the ambiguity with a blocked state, a visible notice, or an explicit recovery action. It must not silently mark work done from prose comments or guess that a dependency is complete.

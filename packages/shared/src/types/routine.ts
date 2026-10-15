@@ -4,6 +4,7 @@ import type {
   RoutineActivityGatePolicy,
   RoutineActivityGateScope,
   RoutineCatchUpPolicy,
+  RoutineNotifyPolicy,
   RoutineConcurrencyPolicy,
   RoutineStatus,
   RoutineTriggerKind,
@@ -83,6 +84,7 @@ export interface Routine {
   status: string;
   concurrencyPolicy: string;
   catchUpPolicy: string;
+  notifyPolicy: string;
   activityGatePolicy: string;
   activityGateScope: string;
   originKind?: string;
@@ -128,6 +130,7 @@ export interface RoutineRevisionSnapshotRoutineV1 {
   status: RoutineStatus;
   concurrencyPolicy: RoutineConcurrencyPolicy;
   catchUpPolicy: RoutineCatchUpPolicy;
+  notifyPolicy: RoutineNotifyPolicy;
   activityGatePolicy: RoutineActivityGatePolicy;
   activityGateScope: RoutineActivityGateScope;
   originKind?: string;

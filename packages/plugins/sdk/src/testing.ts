@@ -1282,6 +1282,8 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             status: declaration.status ?? (assigneeAgentId ? "active" : "paused"),
             concurrencyPolicy: declaration.concurrencyPolicy ?? "coalesce_if_active",
             catchUpPolicy: declaration.catchUpPolicy ?? "skip_missed",
+            // ponytail: plugin declarations omit notifyPolicy; core default is alert (AGL-236).
+            notifyPolicy: "alert",
             activityGatePolicy: declaration.activityGatePolicy ?? "always",
             activityGateScope: declaration.activityGateScope ?? "company",
             variables: declaration.variables ?? [],

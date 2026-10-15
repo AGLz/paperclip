@@ -13,9 +13,15 @@ import {
   isSuccessfulRunHandoffValidPathSkip,
   isPluginManagedIssueLifecycle,
   isSuccessfulRunHandoffRequiredNoticeBody,
+  shouldResolveSilentRoutineHandoffExhaustionAsDone,
   noticeMetadataReferencesRecoveryAction,
 } from "./successful-run-handoff.js";
 import { UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON } from "@paperclipai/adapter-utils/server-utils";
+import {
+  CORRECTIVE_SILENT_NOTIFY_OVERRIDE,
+  SILENT_NOTIFY_DISPOSITION_OVERRIDE,
+  buildRoutineRunBrief,
+} from "@paperclipai/shared";
 
 const run = {
   id: "run-1",
@@ -220,6 +226,75 @@ describe("successful run handoff decision", () => {
     expect(instruction).toContain("Line one.\nLine two.");
     expect(instruction).toContain("Report body[0m intact.");
     expect(instruction).not.toMatch(/[\u0000-\u0008\u000B-\u001F\u007F]/);
+  });
+
+  it("prepends R2 silent override before the routine brief and does not mutate the brief", () => {
+    const baseBrief = "Se OK: responder exactamente [SILENT]. Só reportar falha.";
+    const storedBrief = buildRoutineRunBrief(baseBrief, "silent");
+    expect(storedBrief).toContain(SILENT_NOTIFY_DISPOSITION_OVERRIDE);
+
+    const instruction = buildSuccessfulRunHandoffInstruction({
+      issueIdentifier: "AGL-SILENT",
+      issueTitle: "Argus Hostman Ingest",
+      issueDescription: storedBrief,
+      sourceRunId: "run-silent-1",
+      finalReport: "[SILENT]",
+      nextAction: null,
+      detectedProgressSummary: null,
+      notifyPolicy: "silent",
+    });
+
+    const overrideIdx = instruction.indexOf(CORRECTIVE_SILENT_NOTIFY_OVERRIDE);
+    const briefIdx = instruction.indexOf(baseBrief);
+    expect(overrideIdx).toBeGreaterThanOrEqual(0);
+    expect(briefIdx).toBeGreaterThan(overrideIdx);
+    expect(instruction.indexOf("## Silent notify policy override")).toBe(0);
+    expect(instruction).toContain("typically `done`");
+    // Stored brief quoted intact — override is corrective-only.
+    expect(instruction).toContain(storedBrief);
+    expect(storedBrief).toBe(buildRoutineRunBrief(baseBrief, "silent"));
+  });
+
+  it("does not prepend silent override for alert/always notifyPolicy", () => {
+    const instruction = buildSuccessfulRunHandoffInstruction({
+      issueIdentifier: "AGL-ALERT",
+      issueTitle: "Alert routine",
+      issueDescription: "Normal brief",
+      sourceRunId: "run-alert-1",
+      finalReport: "All good",
+      nextAction: null,
+      detectedProgressSummary: null,
+      notifyPolicy: "alert",
+    });
+
+    expect(instruction).not.toContain(CORRECTIVE_SILENT_NOTIFY_OVERRIDE);
+    expect(instruction.startsWith("## What you were supposed to do")).toBe(true);
+  });
+
+  it("queues silent-routine corrective handoff with override and done guidance after [SILENT]", () => {
+    const decision = decide({
+      issue: {
+        ...issue,
+        originKind: "routine_execution",
+        description: buildRoutineRunBrief(
+          "Se OK: responder exactamente [SILENT].",
+          "silent",
+        ),
+      } as any,
+      finalReport: "[SILENT]",
+      notifyPolicy: "silent",
+    });
+
+    expect(decision.kind).toBe("enqueue");
+    if (decision.kind !== "enqueue") return;
+    expect(decision.instruction.indexOf(CORRECTIVE_SILENT_NOTIFY_OVERRIDE)).toBeLessThan(
+      decision.instruction.indexOf("[SILENT]"),
+    );
+    expect(decision.instruction).toContain("typically `done`");
+    expect(decision.payload).toMatchObject({
+      handoffReason: SUCCESSFUL_RUN_MISSING_STATE_REASON,
+      notifyPolicy: "silent",
+    });
   });
 
   it("does not queue for a run woken by source_scoped_recovery_action", () => {
@@ -610,4 +685,64 @@ describe("successful run handoff decision", () => {
     expect(isSuccessfulRunHandoffRequiredNoticeBody("## This issue still needs a next step\n\nold body")).toBe(true);
     expect(isSuccessfulRunHandoffRequiredNoticeBody("Unrelated comment")).toBe(false);
   });
+
+  describe("shouldResolveSilentRoutineHandoffExhaustionAsDone (R3)", () => {
+    it("resolves silent routine_execution exhaustion as done", () => {
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution", unblockDescriptor: null },
+          notifyPolicy: "silent",
+        }),
+      ).toBe(true);
+    });
+
+    it("keeps alert/always exhaustion on the blocked path", () => {
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "alert",
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "always",
+        }),
+      ).toBe(false);
+    });
+
+    it("keeps real blocked paths (blockers, interaction, unblockDescriptor)", () => {
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "silent",
+          hasExplicitBlockerPath: true,
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "silent",
+          hasPendingInteractionOrApproval: true,
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: {
+            originKind: "routine_execution",
+            unblockDescriptor: { owner: { agentId: "a" }, action: "fix harbor" },
+          },
+          notifyPolicy: "silent",
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "manual" },
+          notifyPolicy: "silent",
+        }),
+      ).toBe(false);
+    });
+  });
+
+
 });

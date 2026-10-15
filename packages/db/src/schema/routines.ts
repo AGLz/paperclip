@@ -36,6 +36,7 @@ export const routines = pgTable(
     status: text("status").notNull().default("active"),
     concurrencyPolicy: text("concurrency_policy").notNull().default("coalesce_if_active"),
     catchUpPolicy: text("catch_up_policy").notNull().default("skip_missed"),
+    notifyPolicy: text("notify_policy").notNull().default("alert"),
     activityGatePolicy: text("activity_gate_policy").notNull().default("always"),
     activityGateScope: text("activity_gate_scope").notNull().default("company"),
     originKind: text("origin_kind").notNull().default("manual"),

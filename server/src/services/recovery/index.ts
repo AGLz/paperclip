@@ -43,10 +43,22 @@ export type {
   RunContinuationDecision,
 } from "./run-liveness-continuations.js";
 export {
+  BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_NEXT_ACTION,
+  BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_REASON,
+  DEFAULT_BOARD_RECOVERY_WITHOUT_RESPONDER_MAX_ATTEMPTS,
+  buildBoardRecoveryWithoutResponderBudget,
+  decideBoardRecoveryRetryCeiling,
+  isBoardRecoveryBudgetExhausted,
+} from "./board-recovery-retry-ceiling.js";
+export type {
+  BoardRecoveryRetryCeilingDecision,
+} from "./board-recovery-retry-ceiling.js";
+export {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
   FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
   LEGACY_SUCCESSFUL_RUN_HANDOFF_NOTICE_PREFIXES,
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
+  SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_OPTIONS,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
@@ -54,11 +66,13 @@ export {
   buildSuccessfulRunHandoffExhaustedNotice,
   buildSuccessfulRunHandoffInstruction,
   buildSuccessfulRunHandoffRequiredNotice,
+  buildSuccessfulRunHandoffSilentExhaustedDoneNotice,
   decideSuccessfulRunHandoff,
   findExistingFinishSuccessfulRunHandoffWake,
   isSuccessfulRunHandoffValidPathSkip,
   isSuccessfulRunHandoffRequiredNoticeBody,
   noticeMetadataReferencesRecoveryAction,
+  shouldResolveSilentRoutineHandoffExhaustionAsDone,
 } from "./successful-run-handoff.js";
 export type {
   SuccessfulRunHandoffNotice,
