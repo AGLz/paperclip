@@ -162,7 +162,7 @@ readiness fixtures, `profile-ci` also runs **CI work benchmark**. It uses one
 GitHub-hosted runner without secrets or AWS access. It compares the unchanged
 PR base and candidate sequentially. It records complete command times, test
 inventories, revisions, and failure logs in the `ci-work-benchmark` artifact.
-The serialized shard must retain the same cases. The fixture comparison retains
+The complete general-server shard must retain the same cases. The fixture comparison retains
 the database contract and splits large Git scanning from bounded staging.
 These command timings exclude queue time and setup; use the full Honeycomb
 waterfall to assess the complete CI critical path.

@@ -354,26 +354,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The server suite is pinned to maxWorkers=1 (server/vitest.config.ts),
-          # so it can only be parallelized across runners. Shard it to keep this
-          # lane off the PR critical path. The suite has grown to ~3184s of
-          # serial vitest wall time (mean of runs 35036001734 and 35024948947,
-          # 2026-09-15): at five plain general-server shards with stale
-          # recorded durations the worst shard ran 806s of tests while the
-          # best ran 417s. This now uses the same shape as release-verify.yml:
-          # the ~429s chat integration suite splits by collected test location
-          # across three dedicated runners (~143s each), and the remaining
-          # ~2755s levels across twelve duration-balanced shards at ~230s
-          # each, in line with the other ~200-290s lanes.
-          #
-          # The balance only holds while the manifest is fresh. By 2026-10-10
-          # the without-chat group had grown to 871 suites and ~5031s of serial
-          # vitest time (mean of runs 38076844891 and 38076972444), 230 of
-          # them unrecorded and weighted at the median, so the twelve shards
-          # ran 313-554s of tests (server 2/12 at 618s was the slowest check
-          # in the run). Re-recorded durations level them to ~415s each; the
-          # shard count stays at twelve because Build and workspaces-b sit
-          # above that already.
+          # Keep twelve duration-balanced server shards. Each shard overlaps
+          # at most two isolated fork workers; cases within a file stay serial.
+          # The chat fixture keeps three independent database-backed shards.
           - group: general-server-without-chat
             group_label: server (1/12)
             shard_index: 0

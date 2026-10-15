@@ -501,7 +501,12 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
         [
           "--project",
           "@paperclipai/server",
-          ...serializedServerVitestArgs,
+          // Files have separate fork processes and isolated homes/configs.
+          // Keep each file's cases serial; overlap only two independent files.
+          // An explicit shared test database cannot be isolated this way.
+          ...(process.env.PAPERCLIP_TEST_DATABASE_URL
+            ? serializedServerVitestArgs
+            : ["--pool=forks", "--isolate", "--fileParallelism", "--maxWorkers=2"]),
           ...shardFiles,
         ],
         `${groupName} shard ${shardIndex + 1}/${shardCount}`,
@@ -578,9 +583,9 @@ const routeTests = walk(serverTestsDir)
 
 // Every server test file that the general-server group is responsible for,
 // i.e. the whole server project minus the route/authz suites that run in the
-// dedicated serialized shards. Sharding this list across runners is what keeps
-// the general-server lane from becoming the PR critical path: the server vitest
-// config pins maxWorkers to 1, so the only way to parallelize is across jobs.
+// dedicated serialized shards. The default server config keeps files serial;
+// the sharded entry point overlaps two isolated files per runner unless an
+// explicit shared test database requires serial execution.
 // Suites are partitioned by recorded duration (scripts/general-server-shard.mjs)
 // rather than round-robin, so one slow suite cluster can't stretch a single shard.
 const serializedRepoPaths = new Set(routeTests.map(test => test.repoPath));

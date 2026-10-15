@@ -75,6 +75,12 @@ When changing the workflow path or branch, authorize the new reference before
 updating the caller. Retain older authorized SHA references while queued runs or
 supported reruns still use them.
 
+General server shards run at most two test files at a time in separate Vitest
+forks. Each file retains its own home, config and process state, and its test
+cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
+serial because the database is shared. Unsharded local tests, route/authz lanes,
+chat integration and native Runner lanes retain their existing concurrency.
+
 For a full wall-clock profile of all main PR CI jobs, add `profile-ci` to the PR.
 See [CI profiling](ci-profiling.md) for the Honeycomb waterfall, coverage,
 operator setup, and activation requirements.
