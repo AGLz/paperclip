@@ -153,13 +153,13 @@ export async function hasRestorableSnapshot(db: Db, companyId: string, versionId
 }
 
 // Counts allocated bytes without following links, matching what df can reclaim.
-export async function allocatedBytes(directory: string, signal?: AbortSignal): Promise<number> {
-  signal?.throwIfAborted();
+export async function allocatedBytes(directory: string, shouldContinue: () => boolean = () => true): Promise<number> {
+  if (!shouldContinue()) throw new Error("Skill cache scan stopped");
   const stat = await fs.lstat(directory);
   if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw new Error("Unsafe skill cache entry");
   let bytes = stat.blocks * 512;
   if (stat.isDirectory()) {
-    for (const entry of await fs.readdir(directory)) bytes += await allocatedBytes(path.join(directory, entry), signal);
+    for (const entry of await fs.readdir(directory)) bytes += await allocatedBytes(path.join(directory, entry), shouldContinue);
   }
   return bytes;
 }

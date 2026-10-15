@@ -19,7 +19,8 @@ database snapshots are never removed by this worker.
 Last-use records live separately under `__version_access__`. Older installations
 without those records receive a full one-hour observation period. Preparation,
 pin persistence and eviction share a company-scoped database lock across server
-processes. Audits hold the lock through their file reads. Eviction atomically
+processes. Snapshot validation and byte counting run outside that lock; cleanup
+rechecks current versions, run pins, last use, and directory identity before rename. Audits hold the lock through their file reads. Eviction atomically
 moves a cache into unique `.trash-<UUID>` directories; trash deletion uses its own lock so normal
 preparation can restore files while deletion finishes. A later sweep finishes
 interrupted trash removal without deleting a newly materialized version.

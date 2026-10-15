@@ -232,93 +232,116 @@ export function skillVersionRetentionService(db: Db, defaults: SkillVersionPrune
     const trashName = (name: string) => name.startsWith(TRASH_PREFIX) && UUID_PATTERN.test(name.slice(TRASH_PREFIX.length));
     const after = (skillId: string, name: string) => !options.cursor || skillId > options.cursor.skillId
       || (skillId === options.cursor.skillId && name > options.cursor.name);
+    type Candidate = { parent: string; skillId: string; name: string; unsafe?: boolean };
+    const entries: Candidate[] = [];
     try {
-      await withSkillVersionCacheLock(db, companyId, async () => {
-        const rootEntries = await listDirectories(root) ?? [];
-        if (!rootEntries.length) return;
-        const skillIds = rootEntries.filter(entry => UUID_PATTERN.test(entry.name)).map(entry => entry.name);
-        const keep = await protectedVersionIds(companyId, skillIds, keepNewest);
-        if (!keep) { skip("unknown_run_pins"); return; }
-        const entries: Array<{ parent: string; skillId: string; name: string; mtimeMs: number }> = [];
-        for (const entry of rootEntries.filter(entry => trashName(entry.name))) {
-          entries.push({ ...entry, parent: root, skillId: "" });
-        }
-        for (const skillId of skillIds) {
-          if (options.cursor && skillId < options.cursor.skillId) continue;
-          const parent = path.join(root, skillId);
+      const rootEntries = await listDirectories(root) ?? [];
+      for (const entry of rootEntries.filter(entry => trashName(entry.name))) {
+        entries.push({ ...entry, parent: root, skillId: "" });
+      }
+      for (const skillId of rootEntries.filter(entry => UUID_PATTERN.test(entry.name)).map(entry => entry.name)) {
+        if (options.cursor && skillId < options.cursor.skillId) continue;
+        if (!shouldContinue()) { result.truncated = true; break; }
+        const parent = path.join(root, skillId);
+        try {
           for (const entry of await listDirectories(parent) ?? []) entries.push({ ...entry, parent, skillId });
-          // Do not read thousands of file trees while holding up preparation.
-          if (entries.filter(entry => after(entry.skillId, entry.name)).length > maxEntries) break;
+        } catch {
+          // One unsafe root consumes a scan slot but cannot stop unrelated skills.
+          entries.push({ parent, skillId, name: "\uffff", unsafe: true });
         }
-        let removals = 0;
-        for (const entry of entries) {
-          if (!after(entry.skillId, entry.name)) continue;
-          if (result.checked >= maxEntries || removals >= maxRemovals || !shouldContinue()) {
-            result.truncated = true;
-            break;
-          }
-          result.checked++;
-          result.cursor = { skillId: entry.skillId, name: entry.name };
-          const target = path.join(entry.parent, entry.name);
-          const isTrash = trashName(entry.name);
-          const isVersion = UUID_PATTERN.test(entry.name);
-          const isStaging = entry.name.startsWith(".") && UUID_PATTERN.test(entry.name.slice(1, 37))
-            && /^-[a-zA-Z0-9]{6}$/.test(entry.name.slice(37));
-          if (!isTrash && !isVersion && !isStaging) { skip("unknown_directory"); continue; }
-          if (versionSnapshotFlights.has(target) || versionSnapshotRemovals.has(target)) { skip("cache_busy"); continue; }
-          try {
-            await ensureSkillCacheDirectory(target);
-            if (isTrash) { if (!dryRun) trash.push(target); removals++; continue; }
-            if (isVersion && keep.has(entry.name)) { result.kept++; skip("protected_version"); continue; }
-            if (isVersion) {
-              const access = skillVersionCachePaths(companyId, entry.skillId, entry.name).access;
-              const used = await lastUsedAt(access);
-              if (used === null) {
-                if (!dryRun) await touchSkillVersionCache(companyId, entry.skillId, entry.name, now);
-                skip("observation_grace"); continue;
-              }
-              if (now - used < graceMs) { result.skippedRecent++; skip("recent_use"); continue; }
-            } else if (now - entry.mtimeMs < graceMs) { result.skippedRecent++; continue; }
-            const [version] = isVersion ? await db.select({ id: companySkillVersions.id }).from(companySkillVersions).where(and(
-              eq(companySkillVersions.companyId, companyId), eq(companySkillVersions.companySkillId, entry.skillId),
-              eq(companySkillVersions.id, entry.name))) : [];
-            if (version && !await hasRestorableSnapshot(db, companyId, version.id)) { skip("snapshot_unavailable"); continue; }
-            const bytes = await allocatedBytes(target);
-            result.candidates++;
-            result.candidateBytes += bytes;
-            removals++;
-            if (dryRun) continue;
-            const renamed = await removeVersionDirectory(entry.parent, entry.name);
-            if (!renamed) continue;
-            trash.push(renamed);
-            result.removed++;
-            if (isStaging) result.removedStaging++;
-            else if (!version) result.removedOrphans++;
-          } catch (error) {
-            result.failed++;
-            skip("unsafe_or_unavailable");
-            logger.warn({ err: error, companyId }, "skill version cache candidate skipped");
-          }
-        }
-        if (!result.truncated) result.cursor = null;
-      }, true);
+        if (entries.filter(entry => after(entry.skillId, entry.name)).length > maxEntries) break;
+      }
     } catch (error) {
-      if (error instanceof SkillCacheBusy) skip("cache_busy");
-      else { result.failed++; skip("unsafe_or_unavailable"); logger.warn({ err: error, companyId }, "skill version retention skipped company"); }
+      result.checked++;
+      result.failed++;
+      skip("unsafe_or_unavailable");
+      logger.warn({ err: error, companyId }, "skill version retention skipped unsafe company root");
+      return result;
     }
+    for (const entry of entries) {
+      if (!after(entry.skillId, entry.name)) continue;
+      if (result.checked >= maxEntries || !shouldContinue()) { result.truncated = true; break; }
+      result.checked++;
+      result.cursor = { skillId: entry.skillId, name: entry.name };
+      if (entry.unsafe) { skip("unsafe_or_unavailable"); continue; }
+      const target = path.join(entry.parent, entry.name);
+      const isTrash = trashName(entry.name);
+      const isVersion = UUID_PATTERN.test(entry.name);
+      const isStaging = entry.name.startsWith(".") && UUID_PATTERN.test(entry.name.slice(1, 37))
+        && /^-[a-zA-Z0-9]{6}$/.test(entry.name.slice(37));
+      if (!isTrash && !isVersion && !isStaging) { skip("unknown_directory"); continue; }
+      if (isTrash) { if (!dryRun) trash.push(target); continue; }
+      // Called under the shared lock both before inspection and immediately
+      // before rename. A preparation between these calls changes the pins/use.
+      const eligible = async () => {
+        if (!shouldContinue()) return null;
+        await ensureSkillCacheDirectory(target);
+        if (versionSnapshotFlights.has(target) || versionSnapshotRemovals.has(target)) { skip("cache_busy"); return null; }
+        const keep = await protectedVersionIds(companyId, [entry.skillId], keepNewest);
+        if (!keep) { skip("unknown_run_pins"); return null; }
+        if (isVersion && keep.has(entry.name)) { result.kept++; skip("protected_version"); return null; }
+        const stat = await fs.lstat(target);
+        if (isVersion) {
+          const used = await lastUsedAt(skillVersionCachePaths(companyId, entry.skillId, entry.name).access);
+          if (used === null) {
+            if (!dryRun) await touchSkillVersionCache(companyId, entry.skillId, entry.name, now);
+            skip("observation_grace"); return null;
+          }
+          if (now - used < graceMs) { result.skippedRecent++; skip("recent_use"); return null; }
+        } else if (now - stat.mtimeMs < graceMs) { result.skippedRecent++; return null; }
+        return stat;
+      };
+      try {
+        const before = await withSkillVersionCacheLock(db, companyId, eligible, true);
+        if (!before) continue;
+        // Inventory transfer/validation and recursive file walks must not hold
+        // the lock needed by agent preparation. Immutable snapshots can be
+        // checked here; mutable current/run pins are checked again below.
+        const [version] = isVersion ? await db.select({ id: companySkillVersions.id }).from(companySkillVersions).where(and(
+          eq(companySkillVersions.companyId, companyId), eq(companySkillVersions.companySkillId, entry.skillId),
+          eq(companySkillVersions.id, entry.name))) : [];
+        if (version && !await hasRestorableSnapshot(db, companyId, version.id)) { skip("snapshot_unavailable"); continue; }
+        const bytes = await allocatedBytes(target, shouldContinue);
+        await withSkillVersionCacheLock(db, companyId, async () => {
+          const current = await eligible();
+          if (!current) return;
+          if (current.dev !== before.dev || current.ino !== before.ino) { skip("cache_changed"); return; }
+          result.candidates++;
+          result.candidateBytes += bytes;
+          if (dryRun) return;
+          const renamed = await removeVersionDirectory(entry.parent, entry.name);
+          if (!renamed) return;
+          trash.push(renamed);
+          result.removed++;
+          if (isStaging) result.removedStaging++;
+          else if (!version) result.removedOrphans++;
+        }, true);
+      } catch (error) {
+        if (!shouldContinue()) { result.truncated = true; break; }
+        if (error instanceof SkillCacheBusy) skip("cache_busy");
+        else if (errorCode(error) === "ENOENT") skip("not_materialized");
+        else {
+          result.failed++;
+          skip("unsafe_or_unavailable");
+          logger.warn({ err: error, companyId }, "skill version cache candidate skipped");
+        }
+      }
+    }
+    if (!result.truncated) result.cursor = null;
     // These unique names are never reused by materialization. A crash leaves
     // them for the next scan; a returning run can rehydrate immediately.
     for (const target of trash) {
       if (!shouldContinue()) break;
       try {
-        // Serialize competing sweepers without holding the preparation lock.
         await withSkillVersionCacheLock(db, `trash:${companyId}:${target}`, async () => {
           await ensureSkillCacheDirectory(target);
-          const bytes = await allocatedBytes(target);
+          const bytes = await allocatedBytes(target, shouldContinue);
+          if (!shouldContinue()) return;
           await removeSnapshotTree(target);
           result.reclaimedBytes += bytes;
         }, true);
       } catch (error) {
+        if (!shouldContinue()) break;
         if (error instanceof SkillCacheBusy || errorCode(error) === "ENOENT") continue;
         result.failed++;
         logger.warn({ err: error, companyId }, "skill version snapshot trash removal failed");

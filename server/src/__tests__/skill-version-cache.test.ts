@@ -31,7 +31,7 @@ describePostgres("immutable skill version cache", () => {
     home = await fs.mkdtemp(path.join(os.tmpdir(), "skill-version-cache-"));
     process.env.PAPERCLIP_HOME = home;
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
   afterAll(async () => {
     if (previousHome === undefined) delete process.env.PAPERCLIP_HOME;
     else process.env.PAPERCLIP_HOME = previousHome;
@@ -159,6 +159,47 @@ describePostgres("immutable skill version cache", () => {
     } finally { release.resolve(); }
     await preparing;
     expect(await sweepSkillVersionCache(other, { companyId: f.companyId })).toMatchObject({ evicted: 0, skipped: { protected_version: 1 } });
+  });
+
+  it("lets preparation finish during slow byte inspection and rechecks its new pin", async () => {
+    const f = await fixture();
+    const old = await f.resolve(f.versions[0]!.id);
+    await touchSkillVersionCache(f.companyId, f.skillId, f.versions[0]!.id, Date.now() - 7_200_000);
+    const inspecting = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const lstat = fs.lstat.bind(fs);
+    let held = false;
+    vi.spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+      if (!held && String(args[0]) === path.join(old.source, ".paperclip-repository", "marker.bin")) {
+        held = true;
+        inspecting.resolve();
+        await release.promise;
+      }
+      return lstat(...args);
+    }) as typeof fs.lstat);
+    const sweep = sweepSkillVersionCache(db, { companyId: f.companyId });
+    await inspecting.promise;
+    const other = createDb(database.connectionString);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const preparation = withSkillVersionCacheLock(other, f.companyId, async () => {
+      await companySkillService(other).listRuntimeSkillEntries(f.companyId, {
+        onlyKeys: new Set([f.key]), versionSelections: new Map([[f.key, f.versions[0]!.id]]),
+      });
+      // Remove grace as an alternative explanation: the newly persisted run pin
+      // must prevent eviction after the original candidate snapshot was read.
+      await touchSkillVersionCache(f.companyId, f.skillId, f.versions[0]!.id, Date.now() - 7_200_000);
+      await activeRun(f.companyId, { skillVersions: { [f.key]: f.versions[0]!.id } });
+      return true;
+    });
+    try {
+      expect(await Promise.race([preparation, new Promise<boolean>(resolve => {
+        timeout = setTimeout(() => resolve(false), 10_000);
+      })])).toBe(true);
+    } finally { clearTimeout(timeout); release.resolve(); }
+    await preparation;
+    expect(await sweep).toMatchObject({ evicted: 0, skipped: { protected_version: 1 } });
+    expect(await fs.stat(old.source)).toBeTruthy();
+    await other.$client.end({ timeout: 1 });
   });
 
   it("keeps terminal run pins until native finalization has settled", async () => {

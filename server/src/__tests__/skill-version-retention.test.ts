@@ -261,6 +261,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     await fs.writeFile(path.join(outside, "keep.txt"), "keep");
     const root = resolveCompanySkillVersionsRoot(companyId);
     const victim = await writeSnapshot(companyId, skillId, versionIds[0]!);
+    const safe = await writeSnapshot(companyId, skillId, versionIds[1]!);
     await fs.chmod(victim, 0o755);
     await fs.symlink(outside, path.join(victim, "escape"));
     const old = new Date(Date.now() - 3 * HOUR_MS);
@@ -272,6 +273,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     await skillVersionRetentionService(db).pruneCompany(companyId, { keepNewest: 1 });
 
     expect(await exists(victim)).toBe(true);
+    expect(await exists(safe)).toBe(false);
     expect(await fs.readFile(path.join(outside, "keep.txt"), "utf8")).toBe("keep");
     expect(await Promise.all(otherDirs.map(exists))).toEqual([true, true, true]);
   });
