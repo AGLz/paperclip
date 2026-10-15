@@ -1,3 +1,4 @@
+import { ensureSkillCacheDirectory, touchSkillVersionCache, withSkillVersionCacheLock } from "./skill-version-cache.js";
 import { retainProjectSkillAccess, skillAccessService } from "./skill-access.js";
 import type { AuthorizationActor } from "./authorization.js";
 import { updateAgentConfigurationInTransaction } from "./agent-configuration-transaction.js";
@@ -34,7 +35,7 @@ import {
 import { readPaperclipSkillSyncPreference, writePaperclipSkillSyncPreference, resolvePaperclipDesiredSkillNames,
   resolveLegacyPaperclipDesiredSkillNames } from "@paperclipai/adapter-utils/server-utils";
 import { REPOSITORY_CONTENT_DIR, repositorySkillProjection } from "./skill-repository-package.js";
-import { removeSkillVersionSnapshots, runVersionSnapshotFlight, touchVersionSnapshot } from "./skill-version-retention.js";
+import { runVersionSnapshotFlight } from "./skill-version-retention.js";
 import type { PaperclipDesiredSkillEntry, PaperclipSkillEntry } from "@paperclipai/adapter-utils/server-utils";
 import type {
   AgentDesiredSkillEntry,
@@ -3532,17 +3533,20 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
     if (skill.metadata?.skillSourceId && skill.metadata?.snapshotHash && skill.currentVersionId) {
-      const version = await getVersion(companyId, skill.id, skill.currentVersionId);
-      if (!version) throw unprocessable("Installed skill version is unavailable.");
-      const sourceLocator = await materializeVersionSnapshot(companyId, skill, version);
-      const audit = await auditInstalledSkillBytes({
-        ...skill,
-        sourceType: "local_path",
-        sourceLocator,
-        fileInventory: await runtimeVersionInventory(companyId, version),
+      const versionId = skill.currentVersionId;
+      return withSkillVersionCacheLock(db, companyId, async () => {
+        const version = await getVersion(companyId, skill.id, versionId);
+        if (!version) throw unprocessable("Installed skill version is unavailable.");
+        const sourceLocator = await materializeVersionSnapshot(companyId, skill, version);
+        const audit = await auditInstalledSkillBytes({
+          ...skill,
+          sourceType: "local_path",
+          sourceLocator,
+          fileInventory: await runtimeVersionInventory(companyId, version),
+        });
+        await persistAuditMetadata(skill, audit);
+        return audit;
       });
-      await persistAuditMetadata(skill, audit);
-      return audit;
     }
     if (skill.sourceType !== "catalog" && skill.sourceType !== "local_path") {
       throw unprocessable("Only local-path and catalog-managed company skills support audit.");
@@ -5962,13 +5966,15 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
         } else if (entry.isFile()) {
           out.push(normalizePortablePath(relativePath));
         } else {
-          out.push(normalizePortablePath(relativePath));
+          throw unprocessable("Unsafe file in materialized skill version.");
         }
       }
       return out;
     }
 
     try {
+      const rootStat = await fs.lstat(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw unprocessable("Unsafe materialized skill directory.");
       return await walk(root, "");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -6012,16 +6018,20 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   }
 
   async function materializeVersionSnapshot(companyId: string, skill: CompanySkill, version: CompanySkillVersion): Promise<string> {
+    return withSkillVersionCacheLock(db, companyId, async () => {
+      const directory = await materializeVersionSnapshotLocked(companyId, skill, version);
+      await touchSkillVersionCache(companyId, skill.id, version.id);
+      return directory;
+    });
+  }
+
+  async function materializeVersionSnapshotLocked(companyId: string, skill: CompanySkill, version: CompanySkillVersion): Promise<string> {
     version = { ...version, fileInventory: await runtimeVersionInventory(companyId, version) };
     const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__versions__", skill.id);
     const skillDir = path.join(runtimeRoot, version.id);
-    // Retention prunes by directory age; a reused snapshot counts as recently used.
     return runVersionSnapshotFlight(skillDir, async () => {
-      if (await materializedVersionSnapshotMatches(skillDir, version)) {
-        await touchVersionSnapshot(skillDir);
-        return skillDir;
-      }
-      await fs.mkdir(runtimeRoot, { recursive: true });
+      await ensureSkillCacheDirectory(runtimeRoot, true);
+      if (await materializedVersionSnapshotMatches(skillDir, version)) return skillDir;
       const staging = await fs.mkdtemp(path.join(runtimeRoot, `.${version.id}-`));
       try {
         let wroteSkillFile = false;
@@ -6141,6 +6151,13 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
   async function listRuntimeSkillEntries(
     companyId: string,
     options: RuntimeSkillEntryOptions = {},
+  ): Promise<PaperclipSkillEntry[]> {
+    return withSkillVersionCacheLock(db, companyId, () => listRuntimeSkillEntriesLocked(companyId, options));
+  }
+
+  async function listRuntimeSkillEntriesLocked(
+    companyId: string,
+    options: RuntimeSkillEntryOptions,
   ): Promise<PaperclipSkillEntry[]> {
     if (options.onlyKeys?.size === 0 || (!options.onlyKeys && options.selectionConfig && !options.includeLegacy
       && readPaperclipSkillSyncPreference(options.selectionConfig).desiredSkills.length === 0)) return [];
@@ -7350,12 +7367,8 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
         logger.warn({ err: error, companyId }, "Skill deleted; quarantined source cleanup failed");
       });
     }
-    // Materialized versions are caches of rows the cascade just removed.
-    for (const skill of deleted) {
-      await removeSkillVersionSnapshots(companyId, skill.id).catch(error => {
-        logger.warn({ err: error, companyId }, "Skill deleted; version snapshot cleanup failed");
-      });
-    }
+    // Version caches may still be linked into a captured run. The retention
+    // worker removes orphan versions only after their run pins have settled.
     return deleted;
   }
 

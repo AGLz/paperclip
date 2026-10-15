@@ -1234,18 +1234,24 @@ async function startServerWithDatabaseTeardown(
   // single-flight, bounded per tick, and stops between removals on shutdown or
   // idle drain. The first sweep runs after startup without delaying readiness.
   const skillVersionRetention = skillVersionRetentionService(db as any, {
+    dryRun: config.skillVersionRetentionDryRun,
     keepNewest: config.skillVersionRetentionKeepNewest,
     graceMs: config.skillVersionRetentionGraceMinutes * 60 * 1000,
     shouldContinue: () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(),
   });
   let skillVersionRetentionInFlight = false;
+  let skillVersionRetentionContinuation: ReturnType<typeof setTimeout> | undefined;
   const sweepSkillVersionSnapshots = () => {
-    if (skillVersionRetentionInFlight || isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
+    if (!config.skillVersionRetentionEnabled || skillVersionRetentionInFlight || isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
     skillVersionRetentionInFlight = true;
     trackHeartbeatSchedulerWork(skillVersionRetention.tick()
       .then((result) => {
-        if (result.removed > 0 || result.failed > 0) {
-          logger.info(result, "skill version snapshot retention removed unused directories");
+        if (result.checked > 0 || result.failed > 0 || Object.keys(result.skipped).length > 0) {
+          logger.info({ ...result, dryRun: config.skillVersionRetentionDryRun }, "skill version snapshot retention");
+        }
+        if (result.truncated && !heartbeatSchedulerStopped) {
+          skillVersionRetentionContinuation = setTimeout(sweepSkillVersionSnapshots, 1000);
+          skillVersionRetentionContinuation.unref?.();
         }
       })
       .catch((err) => {
@@ -2011,6 +2017,7 @@ async function startServerWithDatabaseTeardown(
     clearInterval(skillSourceSyncInterval);
     clearInterval(skillVersionRetentionInterval);
     clearTimeout(skillVersionRetentionStartup);
+    clearTimeout(skillVersionRetentionContinuation);
     await skillSourceSync.stop();
     unsubscribeChatCompletions();
     await deliveryWork.stop();

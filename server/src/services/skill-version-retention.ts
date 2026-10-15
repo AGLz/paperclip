@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
-import { agents, companies, companySkills, companySkillVersions, heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { agents, companies, companySkills, companySkillVersions, type Db } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { logger } from "../middleware/logger.js";
+import { allocatedBytes, ensureSkillCacheDirectory, hasRestorableSnapshot, lastUsedAt,
+  protectedVersions, SkillCacheBusy, skillVersionCachePaths, touchSkillVersionCache,
+  withSkillVersionCacheLock } from "./skill-version-cache.js";
 
 /**
  * Retention for materialized skill version directories.
@@ -18,16 +21,16 @@ import { logger } from "../middleware/logger.js";
  *
  * The prune keeps a directory when it is the skill's current version, an agent
  * pins it, a non-terminal heartbeat run captured it, it is among the newest
- * versions of its skill, or it was materialized or reused within the grace
+ * versions of its skill (when configured), or it was materialized or reused within the grace
  * window. It removes every other version directory, directories whose version
  * or skill row is gone, and abandoned staging directories. Version rows are
  * never deleted here.
  */
 
-export const SKILL_VERSION_RETENTION_DEFAULT_KEEP_NEWEST = 3;
-export const SKILL_VERSION_RETENTION_DEFAULT_GRACE_MS = 2 * 60 * 60 * 1000;
-export const SKILL_VERSION_RETENTION_DEFAULT_MAX_REMOVALS = 500;
-export const SKILL_VERSION_RETENTION_INTERVAL_MS = 30 * 60 * 1000;
+export const SKILL_VERSION_RETENTION_DEFAULT_KEEP_NEWEST = 0;
+export const SKILL_VERSION_RETENTION_DEFAULT_GRACE_MS = 60 * 60 * 1000;
+export const SKILL_VERSION_RETENTION_DEFAULT_MAX_REMOVALS = 50;
+export const SKILL_VERSION_RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 export const SKILL_VERSION_RETENTION_STARTUP_DELAY_MS = 60 * 1000;
 
 /** A run in one of these states can still read (or re-read) its captured skill versions. */
@@ -74,12 +77,6 @@ export async function runVersionSnapshotFlight(skillDir: string, work: () => Pro
   }
 }
 
-/** Marks a reused version directory as recently used, so the grace window protects it. */
-export async function touchVersionSnapshot(skillDir: string) {
-  const now = new Date();
-  await fs.utimes(skillDir, now, now).catch(() => undefined);
-}
-
 function errorCode(error: unknown) {
   return (error as NodeJS.ErrnoException | null)?.code;
 }
@@ -117,75 +114,59 @@ async function removeSnapshotTree(target: string) {
 }
 
 /**
- * Moves a directory out of its readable name in one atomic rename, then
- * deletes it. Returns false when a materialization holds the directory or the
- * directory is already gone.
+ * Moves a directory out of its readable name in one atomic rename under the
+ * shared cache lock. Its unique trash name can be deleted after releasing it.
  */
-async function removeVersionDirectory(parent: string, name: string): Promise<boolean> {
+async function removeVersionDirectory(parent: string, name: string): Promise<string | null> {
   const target = path.join(parent, name);
-  if (path.dirname(target) !== parent) return false;
-  if (versionSnapshotFlights.has(target) || versionSnapshotRemovals.has(target)) return false;
+  if (path.dirname(target) !== parent) return null;
+  if (versionSnapshotFlights.has(target) || versionSnapshotRemovals.has(target)) return null;
   const trash = path.join(parent, `${TRASH_PREFIX}${randomUUID()}`);
   const rename = fs.rename(target, trash);
   versionSnapshotRemovals.set(target, rename);
   try {
     await rename;
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return false;
+    if (errorCode(error) === "ENOENT") return null;
     throw error;
   } finally {
     versionSnapshotRemovals.delete(target);
   }
-  await removeSnapshotTree(trash);
-  return true;
+  return trash;
 }
 
-/** Removes every materialized version of one skill. Used after the skill row is deleted. */
-export async function removeSkillVersionSnapshots(companyId: string, skillId: string) {
-  if (!UUID_PATTERN.test(skillId)) return;
-  const root = resolveCompanySkillVersionsRoot(companyId);
-  const skillRoot = path.join(root, skillId);
-  if (path.dirname(skillRoot) !== root) return;
-  const stat = await fs.lstat(skillRoot).catch(() => null);
-  if (!stat?.isDirectory()) return;
-  const trash = path.join(root, `${TRASH_PREFIX}${randomUUID()}`);
-  try {
-    await fs.rename(skillRoot, trash);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return;
-    throw error;
-  }
-  await removeSnapshotTree(trash);
-}
-
+type CompanyCursor = { skillId: string; name: string };
+export type SkillVersionRetentionCursor = CompanyCursor & { companyId: string };
 export type SkillVersionPruneOptions = {
-  /** Versions to keep per skill, newest first by revision. */
   keepNewest?: number;
-  /** Directories modified (materialized or reused) within this window stay. */
   graceMs?: number;
-  /** Upper bound on directories removed by this call. */
   maxRemovals?: number;
+  /** Bound inspection too, including protected directories. */
+  maxEntries?: number;
   now?: Date;
-  /** Checked between removals; returning false stops the prune early. */
+  dryRun?: boolean;
   shouldContinue?: () => boolean;
 };
-
 export type SkillVersionPruneResult = {
-  removed: number;
-  removedOrphans: number;
-  removedStaging: number;
-  kept: number;
-  skippedRecent: number;
-  failed: number;
-  truncated: boolean;
+  checked: number; candidates: number; candidateBytes: number; reclaimedBytes: number;
+  removed: number; removedOrphans: number; removedStaging: number; kept: number;
+  skippedRecent: number; failed: number; truncated: boolean;
+  skipped: Record<string, number>;
+  cursor: CompanyCursor | null;
 };
+function emptyResult(): SkillVersionPruneResult {
+  return { checked: 0, candidates: 0, candidateBytes: 0, reclaimedBytes: 0,
+    removed: 0, removedOrphans: 0, removedStaging: 0, kept: 0,
+    skippedRecent: 0, failed: 0, truncated: false, skipped: {}, cursor: null };
+}
 
 type DirEntry = { name: string; mtimeMs: number };
 
 async function listDirectories(root: string): Promise<DirEntry[] | null> {
   let names: string[];
   try {
-    names = await fs.readdir(root);
+    await ensureSkillCacheDirectory(root);
+    names = (await fs.readdir(root)).sort();
   } catch (error) {
     if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return null;
     throw error;
@@ -194,7 +175,7 @@ async function listDirectories(root: string): Promise<DirEntry[] | null> {
   for (const name of names) {
     const stat = await fs.lstat(path.join(root, name)).catch(() => null);
     // Never follow a symbolic link out of the versions root.
-    if (!stat?.isDirectory()) continue;
+    if (!stat?.isDirectory() && !stat?.isSymbolicLink()) continue;
     out.push({ name, mtimeMs: stat.mtimeMs });
   }
   return out;
@@ -204,13 +185,6 @@ function chunks<T>(values: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let index = 0; index < values.length; index += size) out.push(values.slice(index, index + size));
   return out;
-}
-
-function collectVersionIds(value: unknown, into: Set<string>) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  for (const versionId of Object.values(value as Record<string, unknown>)) {
-    if (typeof versionId === "string" && versionId) into.add(versionId);
-  }
 }
 
 export function skillVersionRetentionService(db: Db, defaults: SkillVersionPruneOptions = {}) {
@@ -236,124 +210,150 @@ export function skillVersionRetentionService(db: Db, defaults: SkillVersionPrune
         if (entry.versionId) keep.add(entry.versionId);
       }
     }
-    const liveRuns = await db.select({ skillVersions: sql<unknown>`${heartbeatRuns.contextSnapshot} -> 'skillVersions'` })
-      .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, [...SKILL_VERSION_LIVE_RUN_STATUSES])));
-    for (const run of liveRuns) collectVersionIds(run.skillVersions, keep);
+    const runVersions = await protectedVersions(db, companyId);
+    if (!runVersions) return null;
+    for (const version of runVersions) keep.add(version);
     return keep;
   }
 
-  async function pruneCompany(companyId: string, options: SkillVersionPruneOptions = {}): Promise<SkillVersionPruneResult> {
+  async function pruneCompany(companyId: string, options: SkillVersionPruneOptions & { cursor?: CompanyCursor | null } = {}): Promise<SkillVersionPruneResult> {
+    if (!UUID_PATTERN.test(companyId)) throw new Error("Invalid company ID for skill retention");
     const keepNewest = Math.max(0, Math.floor(options.keepNewest ?? defaults.keepNewest ?? SKILL_VERSION_RETENTION_DEFAULT_KEEP_NEWEST));
     const graceMs = Math.max(0, options.graceMs ?? defaults.graceMs ?? SKILL_VERSION_RETENTION_DEFAULT_GRACE_MS);
-    const maxRemovals = Math.max(0, options.maxRemovals ?? defaults.maxRemovals ?? Number.POSITIVE_INFINITY);
+    const maxRemovals = Math.min(50, Math.max(0, options.maxRemovals ?? defaults.maxRemovals ?? SKILL_VERSION_RETENTION_DEFAULT_MAX_REMOVALS));
+    const maxEntries = Math.min(maxRemovals, Math.max(1, options.maxEntries ?? defaults.maxEntries ?? 50));
     const shouldContinue = options.shouldContinue ?? defaults.shouldContinue ?? (() => true);
-    const cutoffMs = (options.now ?? new Date()).getTime() - graceMs;
-    const result: SkillVersionPruneResult = {
-      removed: 0, removedOrphans: 0, removedStaging: 0, kept: 0, skippedRecent: 0, failed: 0, truncated: false,
-    };
+    const dryRun = options.dryRun ?? defaults.dryRun ?? false;
+    const now = (options.now ?? new Date()).getTime();
+    const result = emptyResult();
+    const skip = (reason: string) => { result.skipped[reason] = (result.skipped[reason] ?? 0) + 1; };
+    const trash: string[] = [];
     const root = resolveCompanySkillVersionsRoot(companyId);
-    const rootEntries = await listDirectories(root) ?? [];
-    const skillDirs = rootEntries.filter(entry => UUID_PATTERN.test(entry.name));
-    const trashDirs = rootEntries.filter(entry => entry.name.startsWith(TRASH_PREFIX)
-      && !activeTrash.has(path.join(root, entry.name)));
-    if (skillDirs.length === 0 && trashDirs.length === 0) return result;
-
-    const skillIds = skillDirs.map(entry => entry.name);
-    const liveSkillIds = new Set<string>();
-    for (const batch of chunks(skillIds, QUERY_BATCH)) {
-      for (const row of await db.select({ id: companySkills.id }).from(companySkills)
-        .where(and(eq(companySkills.companyId, companyId), inArray(companySkills.id, batch)))) liveSkillIds.add(row.id);
+    const trashName = (name: string) => name.startsWith(TRASH_PREFIX) && UUID_PATTERN.test(name.slice(TRASH_PREFIX.length));
+    const after = (skillId: string, name: string) => !options.cursor || skillId > options.cursor.skillId
+      || (skillId === options.cursor.skillId && name > options.cursor.name);
+    try {
+      await withSkillVersionCacheLock(db, companyId, async () => {
+        const rootEntries = await listDirectories(root) ?? [];
+        if (!rootEntries.length) return;
+        const skillIds = rootEntries.filter(entry => UUID_PATTERN.test(entry.name)).map(entry => entry.name);
+        const keep = await protectedVersionIds(companyId, skillIds, keepNewest);
+        if (!keep) { skip("unknown_run_pins"); return; }
+        const entries: Array<{ parent: string; skillId: string; name: string; mtimeMs: number }> = [];
+        for (const entry of rootEntries.filter(entry => trashName(entry.name))) {
+          entries.push({ ...entry, parent: root, skillId: "" });
+        }
+        for (const skillId of skillIds) {
+          if (options.cursor && skillId < options.cursor.skillId) continue;
+          const parent = path.join(root, skillId);
+          for (const entry of await listDirectories(parent) ?? []) entries.push({ ...entry, parent, skillId });
+          // Do not read thousands of file trees while holding up preparation.
+          if (entries.filter(entry => after(entry.skillId, entry.name)).length > maxEntries) break;
+        }
+        let removals = 0;
+        for (const entry of entries) {
+          if (!after(entry.skillId, entry.name)) continue;
+          if (result.checked >= maxEntries || removals >= maxRemovals || !shouldContinue()) {
+            result.truncated = true;
+            break;
+          }
+          result.checked++;
+          result.cursor = { skillId: entry.skillId, name: entry.name };
+          const target = path.join(entry.parent, entry.name);
+          const isTrash = trashName(entry.name);
+          const isVersion = UUID_PATTERN.test(entry.name);
+          const isStaging = entry.name.startsWith(".") && UUID_PATTERN.test(entry.name.slice(1, 37))
+            && /^-[a-zA-Z0-9]{6}$/.test(entry.name.slice(37));
+          if (!isTrash && !isVersion && !isStaging) { skip("unknown_directory"); continue; }
+          if (versionSnapshotFlights.has(target) || versionSnapshotRemovals.has(target)) { skip("cache_busy"); continue; }
+          try {
+            await ensureSkillCacheDirectory(target);
+            if (isTrash) { if (!dryRun) trash.push(target); removals++; continue; }
+            if (isVersion && keep.has(entry.name)) { result.kept++; skip("protected_version"); continue; }
+            if (isVersion) {
+              const access = skillVersionCachePaths(companyId, entry.skillId, entry.name).access;
+              const used = await lastUsedAt(access);
+              if (used === null) {
+                if (!dryRun) await touchSkillVersionCache(companyId, entry.skillId, entry.name, now);
+                skip("observation_grace"); continue;
+              }
+              if (now - used < graceMs) { result.skippedRecent++; skip("recent_use"); continue; }
+            } else if (now - entry.mtimeMs < graceMs) { result.skippedRecent++; continue; }
+            const [version] = isVersion ? await db.select({ id: companySkillVersions.id }).from(companySkillVersions).where(and(
+              eq(companySkillVersions.companyId, companyId), eq(companySkillVersions.companySkillId, entry.skillId),
+              eq(companySkillVersions.id, entry.name))) : [];
+            if (version && !await hasRestorableSnapshot(db, companyId, version.id)) { skip("snapshot_unavailable"); continue; }
+            const bytes = await allocatedBytes(target);
+            result.candidates++;
+            result.candidateBytes += bytes;
+            removals++;
+            if (dryRun) continue;
+            const renamed = await removeVersionDirectory(entry.parent, entry.name);
+            if (!renamed) continue;
+            trash.push(renamed);
+            result.removed++;
+            if (isStaging) result.removedStaging++;
+            else if (!version) result.removedOrphans++;
+          } catch (error) {
+            result.failed++;
+            skip("unsafe_or_unavailable");
+            logger.warn({ err: error, companyId }, "skill version cache candidate skipped");
+          }
+        }
+        if (!result.truncated) result.cursor = null;
+      }, true);
+    } catch (error) {
+      if (error instanceof SkillCacheBusy) skip("cache_busy");
+      else { result.failed++; skip("unsafe_or_unavailable"); logger.warn({ err: error, companyId }, "skill version retention skipped company"); }
     }
-    const keep = await protectedVersionIds(companyId, [...liveSkillIds], keepNewest);
-
-    const budgetLeft = () => result.removed < maxRemovals;
-    const tryRemove = async (parent: string, name: string, kind: "version" | "orphan" | "staging") => {
-      if (!budgetLeft() || !shouldContinue()) {
-        result.truncated = true;
-        return;
-      }
+    // These unique names are never reused by materialization. A crash leaves
+    // them for the next scan; a returning run can rehydrate immediately.
+    for (const target of trash) {
+      if (!shouldContinue()) break;
       try {
-        if (!await removeVersionDirectory(parent, name)) return;
-        result.removed++;
-        if (kind === "orphan") result.removedOrphans++;
-        if (kind === "staging") result.removedStaging++;
+        // Serialize competing sweepers without holding the preparation lock.
+        await withSkillVersionCacheLock(db, `trash:${companyId}:${target}`, async () => {
+          await ensureSkillCacheDirectory(target);
+          const bytes = await allocatedBytes(target);
+          await removeSnapshotTree(target);
+          result.reclaimedBytes += bytes;
+        }, true);
       } catch (error) {
-        result.failed++;
-        logger.warn({ err: error, companyId, kind }, "skill version snapshot removal failed");
-      }
-    };
-
-    for (const trash of trashDirs) {
-      if (!budgetLeft() || !shouldContinue()) { result.truncated = true; break; }
-      try {
-        await removeSnapshotTree(path.join(root, trash.name));
-        result.removed++;
-        result.removedStaging++;
-      } catch (error) {
+        if (error instanceof SkillCacheBusy || errorCode(error) === "ENOENT") continue;
         result.failed++;
         logger.warn({ err: error, companyId }, "skill version snapshot trash removal failed");
-      }
-    }
-
-    for (const skillDir of skillDirs) {
-      if (result.truncated) break;
-      const skillRoot = path.join(root, skillDir.name);
-      const entries = await listDirectories(skillRoot);
-      if (!entries) continue;
-      const versionEntries = entries.filter(entry => UUID_PATTERN.test(entry.name));
-      const existingVersions = new Set<string>();
-      if (liveSkillIds.has(skillDir.name)) {
-        for (const batch of chunks(versionEntries.map(entry => entry.name), QUERY_BATCH)) {
-          for (const row of await db.select({ id: companySkillVersions.id }).from(companySkillVersions).where(and(
-            eq(companySkillVersions.companyId, companyId),
-            eq(companySkillVersions.companySkillId, skillDir.name),
-            inArray(companySkillVersions.id, batch),
-          ))) existingVersions.add(row.id);
-        }
-      }
-      for (const entry of entries) {
-        if (result.truncated) break;
-        if (entry.name.startsWith(TRASH_PREFIX)) {
-          // Left behind by a removal that crashed between rename and delete.
-          if (!activeTrash.has(path.join(skillRoot, entry.name))) await tryRemove(skillRoot, entry.name, "staging");
-          continue;
-        }
-        if (entry.name.startsWith(".")) {
-          // A staging directory from an interrupted materialization.
-          if (entry.mtimeMs < cutoffMs) await tryRemove(skillRoot, entry.name, "staging");
-          continue;
-        }
-        if (!UUID_PATTERN.test(entry.name)) continue;
-        if (keep.has(entry.name)) { result.kept++; continue; }
-        if (entry.mtimeMs >= cutoffMs) { result.skippedRecent++; continue; }
-        await tryRemove(skillRoot, entry.name, existingVersions.has(entry.name) ? "version" : "orphan");
-      }
-      if (!liveSkillIds.has(skillDir.name) && !result.truncated) {
-        // The skill row is gone. Drop the per-skill folder once it is empty.
-        await fs.rmdir(skillRoot).catch(() => undefined);
       }
     }
     return result;
   }
 
-  /** Prunes every company, bounded by one shared removal budget per tick. */
+  // A continuation visits later companies and protected directories too; a busy
+  // first company or a dry run cannot starve the remainder of the instance.
+  let cursor: SkillVersionRetentionCursor | null = null;
   async function tick(options: SkillVersionPruneOptions = {}) {
-    const maxRemovals = options.maxRemovals ?? defaults.maxRemovals ?? SKILL_VERSION_RETENTION_DEFAULT_MAX_REMOVALS;
+    const maxRemovals = Math.min(50, options.maxRemovals ?? defaults.maxRemovals ?? SKILL_VERSION_RETENTION_DEFAULT_MAX_REMOVALS);
+    const maxEntries = Math.min(maxRemovals, options.maxEntries ?? defaults.maxEntries ?? 50);
     const shouldContinue = options.shouldContinue ?? defaults.shouldContinue ?? (() => true);
-    const totals = { companies: 0, removed: 0, removedOrphans: 0, removedStaging: 0, failed: 0, truncated: false };
-    for (const company of await db.select({ id: companies.id }).from(companies)) {
-      if (totals.removed >= maxRemovals || !shouldContinue()) { totals.truncated = true; break; }
-      const result = await pruneCompany(company.id, { ...options, maxRemovals: maxRemovals - totals.removed, shouldContinue });
+    const totals = { ...emptyResult(), companies: 0, cursor: null as SkillVersionRetentionCursor | null };
+    const companyRows = await db.select({ id: companies.id }).from(companies).orderBy(asc(companies.id));
+    for (const company of companyRows) {
+      if (cursor && company.id < cursor.companyId) continue;
+      if (totals.checked >= maxEntries || totals.candidates >= maxRemovals || !shouldContinue()) { totals.truncated = true; break; }
+      const result = await pruneCompany(company.id, { ...options, cursor: cursor?.companyId === company.id ? cursor : null,
+        maxEntries: maxEntries - totals.checked, maxRemovals: maxRemovals - totals.candidates, shouldContinue });
       totals.companies++;
-      totals.removed += result.removed;
-      totals.removedOrphans += result.removedOrphans;
-      totals.removedStaging += result.removedStaging;
-      totals.failed += result.failed;
-      if (result.truncated) { totals.truncated = true; break; }
+      for (const key of ["checked", "candidates", "candidateBytes", "reclaimedBytes", "removed", "removedOrphans", "removedStaging", "kept", "skippedRecent", "failed"] as const) totals[key] += result[key];
+      for (const [reason, count] of Object.entries(result.skipped)) totals.skipped[reason] = (totals.skipped[reason] ?? 0) + count;
+      cursor = { companyId: company.id, skillId: "\uffff", name: "" };
+      if (result.truncated) {
+        cursor = { companyId: company.id, ...(result.cursor ?? { skillId: "", name: "" }) };
+        totals.truncated = true;
+        break;
+      }
     }
+    if (!totals.truncated) cursor = null;
+    totals.cursor = cursor;
     return totals;
   }
-
   return { pruneCompany, tick };
 }

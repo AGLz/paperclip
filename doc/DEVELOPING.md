@@ -1989,24 +1989,32 @@ writes this directory from the stored files of the `company_skill_versions` row.
 The directory is a cache. When the server removes it and the row stays, the next
 run that selects the version writes it again.
 
-The server prunes these directories 1 minute after startup and then every 30
-minutes. Each sweep removes at most 500 directories. A sweep stops between
-removals at shutdown. A directory stays when one of these conditions is true:
+The server starts scanning one minute after startup, then hourly, in batches of
+50 inspected directories with one-second continuations. Current versions,
+explicit agent pins, active runs, and unresolved recovery pins stay. A company
+with an active or unsettled run whose pins are unknown is skipped. Optional
+`PAPERCLIP_SKILL_VERSION_RETENTION_KEEP` retains additional newest versions
+(default `0`). Idle versions expire after `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES`
+(default `60`). Separate `__version_access__` records track use; existing caches
+without records receive a full observation period before expiration.
 
-- It is the current version of its skill.
-- An agent pins it in `adapterConfig.paperclipSkillSync.desiredSkills`.
-- A heartbeat run with status `queued`, `scheduled_retry`, `running`, or
-  `interrupted` captured it in `contextSnapshot.skillVersions`.
-- It is one of the newest versions of its skill
-  (`PAPERCLIP_SKILL_VERSION_RETENTION_KEEP`, default `3`).
-- The server wrote or reused it within the grace window
-  (`PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES`, default `120`). Each reuse
-  refreshes the directory modification time.
+Preparation, durable run pins, audits, and eviction share a company-scoped
+PostgreSQL lock across processes. Eligible directories are atomically renamed
+to unique managed `.trash-<UUID>` names. Deletion runs outside the preparation
+lock and resumes after a crash. Saved version and repository snapshot rows are
+retained, and normal runtime use restores missing caches without upstream access.
 
-The sweep also removes directories whose version row or skill row no longer
-exists, and staging directories that an interrupted write left behind. Skill
-deletion removes the `__versions__/<skillId>` directory of that skill.
-Retention never deletes version rows.
+The sweep also handles orphan version directories after explicit skill deletion,
+preserving captured run pins until they settle. Only recognized staging/trash
+names are eligible; unknown directories and symlinked paths are retained.
+
+Set `PAPERCLIP_SKILL_VERSION_RETENTION_DRY_RUN=true` before rollout to inspect
+candidate bytes and skip reasons without deleting or changing access records.
+Set `PAPERCLIP_SKILL_VERSION_RETENTION_ENABLED=false` to disable sweeps while
+leaving restoration available. Internal `skillVersionRetentionService` methods
+support company-scoped diagnosis and bounded instance-wide continuations.
+Server logs report candidates, allocated bytes reclaimed, and skip reasons.
+Compare volume usage separately because concurrent writes affect net savings.
 
 ## App-Shipped Teams Catalog
 
@@ -2131,10 +2139,10 @@ Environment overrides:
   value keeps it on.
 - `PAPERCLIP_SKILL_VERSION_RETENTION_KEEP=<count>` sets how many of the newest
   materialized versions of each skill stay on disk (see "Skill Version Snapshot
-  Retention" above). The default is `3`. A negative, empty, or non-numeric value
+  Retention" above). The default is `0`. A negative, empty, or non-numeric value
   falls back to the default.
 - `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES=<minutes>` sets how long a
-  materialized skill version stays after its last use. The default is `120`. A
+  materialized skill version stays after its last use. The default is `60`. A
   negative, empty, or non-numeric value falls back to the default.
 
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for

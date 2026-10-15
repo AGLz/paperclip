@@ -1,8 +1,9 @@
+import { touchSkillVersionCache } from "../services/skill-version-cache.js";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   agents,
@@ -63,6 +64,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
   }, 20_000);
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companySkills);
@@ -125,6 +127,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     await fs.chmod(path.join(dir, "references"), 0o555);
     const when = new Date(Date.now() - ageMs);
     await fs.utimes(dir, when, when);
+    if (/^[a-f0-9-]{36}$/.test(name)) await touchSkillVersionCache(companyId, skillId, name, when.getTime());
     return dir;
   }
 
@@ -137,7 +140,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     }).returning({ id: agents.id });
     await db.insert(heartbeatRuns).values([
       { companyId, agentId: agent!.id, status: "running", contextSnapshot: { skillVersions: { [key]: v[1] } } },
-      { companyId, agentId: agent!.id, status: "succeeded", contextSnapshot: { skillVersions: { [key]: v[2] } } },
+      { companyId, agentId: agent!.id, status: "succeeded", finishedAt: new Date(), contextSnapshot: { skillVersions: { [key]: v[2] } } },
     ]);
     const dirs = await Promise.all(v.map((id, index) => writeSnapshot(companyId, skillId, id, index === 3 ? 0 : 3 * HOUR_MS)));
 
@@ -160,20 +163,22 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     const orphanSkillVersion = await writeSnapshot(companyId, orphanSkillId, randomUUID());
     const staleStaging = await writeSnapshot(companyId, skillId, `.${versionIds[0]}-abc123`);
     const freshStaging = await writeSnapshot(companyId, skillId, `.${versionIds[0]}-def456`, 0);
-    const leftoverTrash = await writeSnapshot(companyId, skillId, ".trash-leftover", 0);
+    const leftoverTrash = await writeSnapshot(companyId, skillId, `\.trash-${randomUUID()}`, 0);
     const unknown = await writeSnapshot(companyId, skillId, "operator-notes");
+    const hidden = await writeSnapshot(companyId, skillId, ".notes");
 
     const result = await skillVersionRetentionService(db).pruneCompany(companyId);
 
     expect(await exists(current)).toBe(true);
     expect(await exists(orphanVersion)).toBe(false);
     expect(await exists(orphanSkillVersion)).toBe(false);
-    expect(await exists(path.join(root, orphanSkillId))).toBe(false);
+    expect(await fs.readdir(path.join(root, orphanSkillId))).toEqual([]);
     expect(await exists(staleStaging)).toBe(false);
     expect(await exists(freshStaging)).toBe(true);
     expect(await exists(leftoverTrash)).toBe(false);
     expect(await exists(unknown)).toBe(true);
-    expect(result).toMatchObject({ removedOrphans: 2, removedStaging: 2, failed: 0 });
+    expect(await exists(hidden)).toBe(true);
+    expect(result).toMatchObject({ removedOrphans: 2, removedStaging: 1, failed: 0 });
     expect((await fs.readdir(path.join(root, skillId))).filter(name => name.startsWith(".trash-"))).toEqual([]);
   });
 
@@ -186,7 +191,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
       .find(entry => entry.key === key)!;
     expect(first.sourceStatus).toBe("available");
     const old = new Date(Date.now() - 3 * HOUR_MS);
-    await fs.utimes(first.source, old, old);
+    await touchSkillVersionCache(companyId, path.basename(path.dirname(first.source)), path.basename(first.source), old.getTime());
 
     await skillVersionRetentionService(db).pruneCompany(companyId, { keepNewest: 1 });
     expect(await exists(first.source)).toBe(false);
@@ -205,7 +210,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     const first = (await svc.listRuntimeSkillEntries(companyId, { versionSelections: selections }))
       .find(entry => entry.key === key)!;
     const old = new Date(Date.now() - 3 * HOUR_MS);
-    await fs.utimes(first.source, old, old);
+    await touchSkillVersionCache(companyId, path.basename(path.dirname(first.source)), path.basename(first.source), old.getTime());
     await svc.listRuntimeSkillEntries(companyId, { versionSelections: selections });
 
     const result = await skillVersionRetentionService(db).pruneCompany(companyId, { keepNewest: 1 });
@@ -228,17 +233,22 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     expect(await exists(dir)).toBe(false);
   });
 
-  it("removes the skill's versions folder when the skill is deleted", async () => {
+  it("sweeps deleted skills after protecting existing runs", async () => {
     const companyId = await createCompany();
     const { skillId, versionIds } = await createSkill(companyId, 2);
-    await writeSnapshot(companyId, skillId, versionIds[0]!);
-    await writeSnapshot(companyId, skillId, versionIds[1]!, 0);
-
+    const first = await writeSnapshot(companyId, skillId, versionIds[0]!);
+    const second = await writeSnapshot(companyId, skillId, versionIds[1]!);
+    const [agent] = await db.insert(agents).values({ companyId, name: "Detached agent" }).returning();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId: agent!.id, status: "running",
+      contextSnapshot: { skillVersions: { retained: versionIds[0] } } }).returning();
     await companySkillService(db).deleteSkill(companyId, skillId);
-
-    const root = resolveCompanySkillVersionsRoot(companyId);
-    expect(await exists(path.join(root, skillId))).toBe(false);
-    expect((await fs.readdir(root)).filter(name => name.startsWith(".trash-"))).toEqual([]);
+    expect(await exists(first)).toBe(true);
+    await skillVersionRetentionService(db).pruneCompany(companyId);
+    expect(await exists(first)).toBe(true);
+    expect(await exists(second)).toBe(false);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, run!.id));
+    await skillVersionRetentionService(db).pruneCompany(companyId);
+    expect(await exists(first)).toBe(false);
   });
 
   it("never removes anything outside the company's versions root", async () => {
@@ -261,7 +271,7 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
 
     await skillVersionRetentionService(db).pruneCompany(companyId, { keepNewest: 1 });
 
-    expect(await exists(victim)).toBe(false);
+    expect(await exists(victim)).toBe(true);
     expect(await fs.readFile(path.join(outside, "keep.txt"), "utf8")).toBe("keep");
     expect(await Promise.all(otherDirs.map(exists))).toEqual([true, true, true]);
   });
@@ -272,9 +282,34 @@ describeEmbeddedPostgres("skill version snapshot retention", () => {
     await Promise.all(versionIds.map(id => writeSnapshot(companyId, skillId, id)));
     const retention = skillVersionRetentionService(db, { keepNewest: 1, maxRemovals: 2 });
 
-    expect(await retention.tick()).toMatchObject({ removed: 2, truncated: true });
-    expect(await retention.tick()).toMatchObject({ removed: 2, truncated: true });
-    expect(await retention.tick()).toMatchObject({ removed: 1, truncated: false });
+    let total = 0;
+    for (let index = 0; index < 5; index++) {
+      const result = await retention.tick();
+      expect(result.checked).toBeLessThanOrEqual(2);
+      total += result.removed;
+      if (!result.truncated) break;
+    }
+    expect(total).toBe(5);
     expect(await fs.readdir(path.join(resolveCompanySkillVersionsRoot(companyId), skillId))).toEqual([versionIds[5]]);
   });
+  it("bounds failed attempts and continues beyond them", async () => {
+    const companyId = await createCompany();
+    const { skillId, versionIds } = await createSkill(companyId, 6);
+    await Promise.all(versionIds.map(id => writeSnapshot(companyId, skillId, id)));
+    const rename = vi.spyOn(fs, "rename").mockRejectedValue(Object.assign(new Error("read-only fixture"), { code: "EACCES" }));
+    const retention = skillVersionRetentionService(db, { maxRemovals: 2 });
+    let checked = 0;
+    let failures = 0;
+    for (let index = 0; index < 5; index++) {
+      const result = await retention.tick();
+      expect(result.checked).toBeLessThanOrEqual(2);
+      checked += result.checked;
+      failures += result.failed;
+      if (!result.truncated) break;
+    }
+    expect(checked).toBe(6);
+    expect(failures).toBe(5);
+    expect(rename).toHaveBeenCalledTimes(5);
+  });
+
 });

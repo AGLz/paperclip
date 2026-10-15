@@ -81,6 +81,8 @@ export interface Config {
   databaseBackupDir: string;
   workspaceReaperCooldownDays: number;
   workspaceCompactionDelayHours: number | null;
+  skillVersionRetentionEnabled: boolean;
+  skillVersionRetentionDryRun: boolean;
   skillVersionRetentionKeepNewest: number;
   skillVersionRetentionGraceMinutes: number;
   serveUi: boolean;
@@ -326,8 +328,8 @@ export function loadConfig(): Config {
     const value = Number(raw);
     return raw && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
   };
-  const skillVersionRetentionKeepNewest = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_KEEP", 3);
-  const skillVersionRetentionGraceMinutes = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES", 120);
+  const skillVersionRetentionKeepNewest = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_KEEP", 0);
+  const skillVersionRetentionGraceMinutes = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES", 60);
   const bindValidationErrors = validateConfiguredBindMode({
     deploymentMode,
     deploymentExposure,
@@ -375,6 +377,8 @@ export function loadConfig(): Config {
     databaseBackupDir,
     workspaceReaperCooldownDays,
     workspaceCompactionDelayHours,
+    skillVersionRetentionEnabled: process.env.PAPERCLIP_SKILL_VERSION_RETENTION_ENABLED !== "false",
+    skillVersionRetentionDryRun: process.env.PAPERCLIP_SKILL_VERSION_RETENTION_DRY_RUN === "true",
     skillVersionRetentionKeepNewest,
     skillVersionRetentionGraceMinutes,
     serveUi:
