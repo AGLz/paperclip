@@ -2,9 +2,11 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, agents, heartbeatRuns, issues } from "@paperclipai/db";
 import {
+  CORRECTIVE_SILENT_NOTIFY_OVERRIDE,
   isUuidLike,
   type IssueCommentMetadata,
   type IssueCommentPresentation,
+  type RoutineNotifyPolicy,
   type RunLivenessState,
 } from "@paperclipai/shared";
 import { withRecoveryContext } from "./status-only-context.js";
@@ -395,6 +397,8 @@ export function buildSuccessfulRunHandoffInstruction(input: {
   finalReport: string | null;
   nextAction: string | null;
   detectedProgressSummary: string | null;
+  /** Typed routine notifyPolicy — when `silent`, prepend R2 override before the brief. */
+  notifyPolicy?: RoutineNotifyPolicy | null;
 }) {
   const issueLabel = input.issueIdentifier ?? "this issue";
   const issueTitle = readInlineUntrustedText(input.issueTitle) ?? "(untitled)";
@@ -404,7 +408,16 @@ export function buildSuccessfulRunHandoffInstruction(input: {
     2000,
   );
   const nextAction = ellipsize(readUntrustedText(input.nextAction), 500);
+  const silentOverride = input.notifyPolicy === "silent"
+    ? [
+        "## Silent notify policy override (mandatory)",
+        CORRECTIVE_SILENT_NOTIFY_OVERRIDE,
+        "A prior `[SILENT]` reply or a silent notify brief does **not** satisfy this handoff. Choose a numbered disposition below — typically `done` when the routine work succeeded and there is nothing left to report.",
+        "",
+      ]
+    : [];
   return [
+    ...silentOverride,
     "## What you were supposed to do",
     `You are assigned ${issueLabel}: ${issueTitle}.`,
     ...(description
@@ -478,6 +491,8 @@ export function decideSuccessfulRunHandoff(input: {
   hasActiveRoutineContinuation: boolean;
   budgetBlocked: boolean;
   idempotentWakeExists: boolean;
+  /** Typed notifyPolicy of the source routine when issue.originKind is routine_execution. */
+  notifyPolicy?: RoutineNotifyPolicy | null;
 }): SuccessfulRunHandoffDecision {
   const { run, issue, agent } = input;
 
@@ -538,6 +553,7 @@ export function decideSuccessfulRunHandoff(input: {
     finalReport: input.finalReport,
     nextAction: input.nextAction,
     detectedProgressSummary: input.detectedProgressSummary,
+    notifyPolicy: input.notifyPolicy,
   });
   const payload = withRecoveryContext({
     issueId: issue.id,
@@ -555,6 +571,7 @@ export function decideSuccessfulRunHandoff(input: {
     followUpRequested: true,
     resumeFromRunId: run.id,
     ...(input.taskKey ? { taskKey: input.taskKey } : {}),
+    ...(input.notifyPolicy ? { notifyPolicy: input.notifyPolicy } : {}),
     instruction,
   }, "normal_model");
 

@@ -400,7 +400,15 @@ routines always includes the override:
 Legacy descriptions that say `Notify policy: silent` are backfilled via
 `scripts/backfill-routine-notify-policy.sql`. See issue AGL-236 / plan AGL-199.
 
+**R2:** When a successful run ends without a disposition, the corrective
+`successful_run_missing_state` handoff prompt prepends an override *before* any
+quoted routine brief:
 
+> Você deve registrar uma disposição mesmo quando a política de notificação da rotina é silent.
+
+That override is mandatory when the source routine's typed `notifyPolicy` is
+`silent`. The stored routine brief is left intact — only the corrective wake
+instruction carries the override. See issue AGL-239.
 
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 

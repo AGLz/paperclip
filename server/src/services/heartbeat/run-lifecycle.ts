@@ -55,6 +55,7 @@ import {
 import type { Db } from "@paperclipai/db";
 import {
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
+  resolveRoutineNotifyPolicy,
   type HeartbeatRunStatusPhase,
   type RequestConfirmationResult,
   type RunLivenessState,
@@ -1640,6 +1641,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         monitorNextCheckAt: issues.monitorNextCheckAt,
         projectId: issues.projectId,
         originKind: issues.originKind,
+        originId: issues.originId,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
@@ -1681,6 +1683,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       budgetBlock,
       pauseHold,
       activeRoutineContinuation,
+      sourceRoutineNotify,
     ] = await Promise.all([
       issue
         ? db
@@ -1827,7 +1830,35 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             .limit(1)
             .then((rows) => rows[0] ?? null)
         : Promise.resolve(null),
+      issue?.originKind === "routine_execution" && issue.originId
+        ? db
+            .select({
+              notifyPolicy: routines.notifyPolicy,
+              description: routines.description,
+            })
+            .from(routines)
+            .where(
+              and(
+                eq(routines.id, issue.originId),
+                eq(routines.companyId, issue.companyId),
+              ),
+            )
+            .limit(1)
+            .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
     ]);
+
+    const notifyPolicy = sourceRoutineNotify
+      ? resolveRoutineNotifyPolicy({
+          notifyPolicy: sourceRoutineNotify.notifyPolicy as
+            | "silent"
+            | "alert"
+            | "always"
+            | null
+            | undefined,
+          description: sourceRoutineNotify.description,
+        })
+      : null;
 
     const decision = decideSuccessfulRunHandoff({
       run,
@@ -1850,6 +1881,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       hasActiveRoutineContinuation: Boolean(activeRoutineContinuation),
       budgetBlocked: Boolean(budgetBlock),
       idempotentWakeExists: Boolean(existingWake),
+      notifyPolicy,
     });
 
     if (isSuccessfulRunHandoffValidPathSkip(decision) && issue) {
