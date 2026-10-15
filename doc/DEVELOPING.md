@@ -1981,6 +1981,33 @@ CI runs `pnpm --filter @paperclipai/skills-catalog validate` and the package's
 vitest suite, so always regenerate the manifest in the same commit as the
 catalog change.
 
+## Skill Version Snapshot Retention
+
+A run uses a skill version from a directory on disk:
+`<instance>/skills/<companyId>/__versions__/<skillId>/<versionId>/`. The server
+writes this directory from the stored files of the `company_skill_versions` row.
+The directory is a cache. When the server removes it and the row stays, the next
+run that selects the version writes it again.
+
+The server prunes these directories 1 minute after startup and then every 30
+minutes. Each sweep removes at most 500 directories. A sweep stops between
+removals at shutdown. A directory stays when one of these conditions is true:
+
+- It is the current version of its skill.
+- An agent pins it in `adapterConfig.paperclipSkillSync.desiredSkills`.
+- A heartbeat run with status `queued`, `scheduled_retry`, `running`, or
+  `interrupted` captured it in `contextSnapshot.skillVersions`.
+- It is one of the newest versions of its skill
+  (`PAPERCLIP_SKILL_VERSION_RETENTION_KEEP`, default `3`).
+- The server wrote or reused it within the grace window
+  (`PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES`, default `120`). Each reuse
+  refreshes the directory modification time.
+
+The sweep also removes directories whose version row or skill row no longer
+exists, and staging directories that an interrupted write left behind. Skill
+deletion removes the `__versions__/<skillId>` directory of that skill.
+Retention never deletes version rows.
+
 ## App-Shipped Teams Catalog
 
 The team catalog package mirrors the skills catalog workflow for
@@ -2102,6 +2129,13 @@ Environment overrides:
   non-numeric value falls back to the default.
 - `PAPERCLIP_WORKSPACE_COMPACTION_ENABLED=false` turns compaction off. Any other
   value keeps it on.
+- `PAPERCLIP_SKILL_VERSION_RETENTION_KEEP=<count>` sets how many of the newest
+  materialized versions of each skill stay on disk (see "Skill Version Snapshot
+  Retention" above). The default is `3`. A negative, empty, or non-numeric value
+  falls back to the default.
+- `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES=<minutes>` sets how long a
+  materialized skill version stays after its last use. The default is `120`. A
+  negative, empty, or non-numeric value falls back to the default.
 
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
 `db-backup-to-s3.failure` in the backup directory, beside the backup directory,

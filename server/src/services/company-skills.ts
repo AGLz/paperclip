@@ -34,6 +34,7 @@ import {
 import { readPaperclipSkillSyncPreference, writePaperclipSkillSyncPreference, resolvePaperclipDesiredSkillNames,
   resolveLegacyPaperclipDesiredSkillNames } from "@paperclipai/adapter-utils/server-utils";
 import { REPOSITORY_CONTENT_DIR, repositorySkillProjection } from "./skill-repository-package.js";
+import { removeSkillVersionSnapshots, runVersionSnapshotFlight, touchVersionSnapshot } from "./skill-version-retention.js";
 import type { PaperclipDesiredSkillEntry, PaperclipSkillEntry } from "@paperclipai/adapter-utils/server-utils";
 import type {
   AgentDesiredSkillEntry,
@@ -280,8 +281,6 @@ type ParsedSkillImportSource = {
   originalSkillsShUrl: string | null;
   warnings: string[];
 };
-
-const versionSnapshotFlights = new Map<string, Promise<string>>();
 
 const EXTERNAL_SKILL_SOURCE_TYPES = new Set<CompanySkillSourceType>(["github", "skills_sh", "url"]);
 
@@ -6016,10 +6015,12 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     version = { ...version, fileInventory: await runtimeVersionInventory(companyId, version) };
     const runtimeRoot = path.resolve(resolveManagedSkillsRoot(companyId), "__versions__", skill.id);
     const skillDir = path.join(runtimeRoot, version.id);
-    const existing = versionSnapshotFlights.get(skillDir);
-    if (existing) return existing;
-    const work = (async () => {
-      if (await materializedVersionSnapshotMatches(skillDir, version)) return skillDir;
+    // Retention prunes by directory age; a reused snapshot counts as recently used.
+    return runVersionSnapshotFlight(skillDir, async () => {
+      if (await materializedVersionSnapshotMatches(skillDir, version)) {
+        await touchVersionSnapshot(skillDir);
+        return skillDir;
+      }
       await fs.mkdir(runtimeRoot, { recursive: true });
       const staging = await fs.mkdtemp(path.join(runtimeRoot, `.${version.id}-`));
       try {
@@ -6044,9 +6045,7 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
         }
         return skillDir;
       } finally { await fs.rm(staging, { recursive: true, force: true }); }
-    })();
-    versionSnapshotFlights.set(skillDir, work);
-    try { return await work; } finally { versionSnapshotFlights.delete(skillDir); }
+    });
   }
 
   function resolveRuntimeSkillMaterializedPath(companyId: string, skill: Pick<CompanySkill, "key" | "slug">) {
@@ -7349,6 +7348,12 @@ export function companySkillService(db: Db, options: { actor?: AuthorizationActo
     for (const item of moved) {
       await fs.rm(item.quarantine, { recursive: true, force: true }).catch(error => {
         logger.warn({ err: error, companyId }, "Skill deleted; quarantined source cleanup failed");
+      });
+    }
+    // Materialized versions are caches of rows the cascade just removed.
+    for (const skill of deleted) {
+      await removeSkillVersionSnapshots(companyId, skill.id).catch(error => {
+        logger.warn({ err: error, companyId }, "Skill deleted; version snapshot cleanup failed");
       });
     }
     return deleted;

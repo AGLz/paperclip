@@ -81,6 +81,8 @@ export interface Config {
   databaseBackupDir: string;
   workspaceReaperCooldownDays: number;
   workspaceCompactionDelayHours: number | null;
+  skillVersionRetentionKeepNewest: number;
+  skillVersionRetentionGraceMinutes: number;
   serveUi: boolean;
   uiDevMiddleware: boolean;
   secretsProvider: SecretProvider;
@@ -313,6 +315,19 @@ export function loadConfig(): Config {
           && workspaceCompactionDelayHoursRaw >= 0
         ? workspaceCompactionDelayHoursRaw
         : 1;
+  // Skill version retention removes materialized version directories under
+  // `skills/<companyId>/__versions__/` that no current version, agent pin, or
+  // live run uses. It keeps this many newest versions per skill as a warm
+  // cache. A version directory used within the grace window also stays. A
+  // removed directory is written again from its version row on next use.
+  // Negative, empty, or non-numeric values fall back to the defaults.
+  const nonNegativeIntegerEnv = (name: string, fallback: number) => {
+    const raw = process.env[name]?.trim();
+    const value = Number(raw);
+    return raw && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+  };
+  const skillVersionRetentionKeepNewest = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_KEEP", 3);
+  const skillVersionRetentionGraceMinutes = nonNegativeIntegerEnv("PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES", 120);
   const bindValidationErrors = validateConfiguredBindMode({
     deploymentMode,
     deploymentExposure,
@@ -360,6 +375,8 @@ export function loadConfig(): Config {
     databaseBackupDir,
     workspaceReaperCooldownDays,
     workspaceCompactionDelayHours,
+    skillVersionRetentionKeepNewest,
+    skillVersionRetentionGraceMinutes,
     serveUi:
       process.env.SERVE_UI !== undefined
         ? process.env.SERVE_UI === "true"
