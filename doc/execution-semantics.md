@@ -1521,6 +1521,13 @@ size. Remote checkpoint archive and expanded-size limits remain 64 MiB.
 
 ### Warm sandbox continuity
 
+Remote native turns suspend their runner and persist a verified harness backup
+before returning completion, including in warm mode. The sandbox and provider
+history remain reusable; the next turn resumes that history under fresh run
+authority. Completed remote turns do not rely on an in-memory idle owner
+surviving a controller restart. A failed suspension or backup retains its recovery
+obligation rather than certifying the state as safely reusable.
+
 For the native runner, warm mode requests a reusable sandbox lease **before**
 lease acquisition. The environment's explicit runner lifecycle overrides the
 agent default; an inherited lifecycle uses the current agent setting on each
