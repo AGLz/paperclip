@@ -80,6 +80,8 @@ forks. Each file retains its own home, config and process state, and its test
 cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
 serial because the database is shared. Unsharded local tests, route/authz lanes,
 chat integration and native Runner lanes retain their existing concurrency.
+The Runner transport lease-expiry and cold-admission regressions live in their
+own file so those real-clock waits overlap other files in the existing pool.
 
 For a full wall-clock profile of all main PR CI jobs, add `profile-ci` to the PR.
 See [CI profiling](ci-profiling.md) for the Honeycomb waterfall, coverage,
