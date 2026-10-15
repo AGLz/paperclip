@@ -49,6 +49,16 @@ function fixture() {
 beforeEach(() => { vi.clearAllMocks(); native.claim.mockResolvedValue(null); });
 
 describe("instruction working-copy extraction boundary", () => {
+  it.each(["openai_dot_mcp", "muse_external"])("does not prepare an instruction filesystem for %s", async backend => {
+    const f = fixture();
+    const result = await f.controller.prepare({ ...f.prepare, hasInstructionFilesystem: false,
+      nativeRuntimeResolution: { kind: "native", profile: { backend } } as Prepare["nativeRuntimeResolution"] });
+    expect(result).toEqual(f.prepare.runtimeConfig);
+    expect(f.copies.prepare).not.toHaveBeenCalled();
+    expect(native.reserve).not.toHaveBeenCalled();
+    expect(f.controller.instructionCopy).toBeNull();
+  });
+
   it("retains a warm reservation for outer cleanup when subsequent preparation throws", async () => {
     const f = fixture();
     f.copies.prepare.mockRejectedValue(new Error("preparation interrupted"));

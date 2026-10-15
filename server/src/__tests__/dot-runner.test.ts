@@ -1,5 +1,6 @@
 import { createGrokRoutineDispatcher } from "../services/grok-bot/dispatcher.js";
 import { grokRoutineService } from "../services/grok-bot/routine.js";
+import { assertNoExternalOverlap } from "../modules/external-agents/admission.js";
 import { accessService } from "../services/access.js";
 import { Readable } from "node:stream";
 import { createPublicMcpTransfers } from "../services/public-mcp/file-transfers.js";
@@ -207,6 +208,61 @@ describe("durable Dot Runner integration", () => {
     app.use("/api", publicMcpManagementRoutes(personal, oauth));
     return { app, personal };
   }
+
+  it.each(["grok_bot_mcp", "codex_app_server"] as const)("fences a running Grok overlap before assignment materialization with %s", async driverKind => {
+    const f = await fixture({ provider: "grok_bot" });
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: f.agent.id,
+      status: "running", runtimeMode: "native", nativePhase: "preparing", driverKind,
+      invocationSource: "assignment", triggerDetail: "system" }).returning();
+    expect(await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.runId, run!.id))).toHaveLength(0);
+    await expect(db.transaction(tx => assertNoExternalOverlap(tx, f.company.id, f.agent.id))).rejects.toThrow("External work is live or unresolved");
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, run!.id));
+    await expect(db.transaction(tx => assertNoExternalOverlap(tx, f.company.id, f.agent.id))).resolves.toBeUndefined();
+  });
+
+  it.each(["openai_dot", "grok_bot"] as const)("requires a matching %s descriptor for a V6 authority fence", async provider => {
+    const f = await fixture({ provider }), { run, assignment } = await offeredWork(f);
+    const binding = { companyId: f.company.id, agentId: f.agent.id, runId: run.id };
+    const event = { sourceEventId: randomUUID(), payload: { kind: "authority_revoked" as const, binding: {
+      ...f.snapshot, runId: run.id, normalizedSessionId: assignment.normalizedSessionId,
+      turnId: assignment.turnId, assignmentRevision: assignment.revision,
+    } } };
+    const foreign = provider === "openai_dot" ? "grok_bot" as const : "openai_dot" as const;
+    await expect(f.broker.port({ binding, provider: { kind: foreign, binding: f.snapshot } }).dispatch(event)).rejects.toThrow("binding unavailable");
+    expect((await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id)))[0]!.status).toBe("offered");
+    await f.broker.port({ binding, provider: { kind: provider, binding: f.snapshot } }).dispatch(event);
+    expect((await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id)))[0]!.status).toBe("fenced");
+  });
+
+  it.each(["openai_dot", "grok_bot"] as const)("keeps %s assignment authority after a rejected finish receipt until a completed finish", async provider => {
+    const f = await fixture({ provider }), { run, assignment } = await offeredWork(f);
+    const acceptedAt = new Date("2026-10-01T00:00:00.000Z");
+    await db.update(dotRunnerAssignments).set({ status: "accepted", acceptedAt }).where(eq(dotRunnerAssignments.id, assignment.id));
+    const port = f.broker.port({ binding: { companyId: f.company.id, agentId: f.agent.id, runId: run.id },
+      provider: { kind: provider, binding: f.snapshot } });
+    const binding = { ...f.snapshot, runId: run.id, normalizedSessionId: assignment.normalizedSessionId,
+      turnId: assignment.turnId, assignmentRevision: assignment.revision };
+    const rejectedId = randomUUID();
+    await db.insert(dotRunnerOperations).values({ companyId: f.company.id, assignmentId: assignment.id,
+      requestId: rejectedId, digest: "rejected-finish", command: { action: "finish" }, status: "admitted" });
+    const rejection = { sourceEventId: randomUUID(), payload: { binding, requestId: rejectedId,
+      outcome: { status: "rejected", message: "Completion evidence was not accepted" } } };
+    await port.settle(rejection);
+    const [rejected] = await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id));
+    expect(rejected).toMatchObject({ status: "accepted", acceptedAt, settledAt: null });
+    const [receipt] = await db.select().from(dotRunnerOperations).where(eq(dotRunnerOperations.requestId, rejectedId));
+    expect(receipt!.outcome).toEqual(rejection.payload.outcome);
+    await port.settle(rejection);
+    expect((await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id)))[0]).toEqual(rejected);
+    const completedId = randomUUID();
+    await db.insert(dotRunnerOperations).values({ companyId: f.company.id, assignmentId: assignment.id,
+      requestId: completedId, digest: "completed-finish", command: { action: "finish" }, status: "admitted" });
+    await port.settle({ sourceEventId: randomUUID(), payload: { binding, requestId: completedId,
+      outcome: { status: "completed" } } });
+    const [completed] = await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id));
+    expect(completed).toMatchObject({ status: "settled", acceptedAt });
+    expect(completed!.settledAt).toBeInstanceOf(Date);
+  });
 
   it("reapplies the Dot-only migration after the merged gateway schema", async () => {
     const migration = await readFile(new URL("../../../packages/db/src/migrations/0317_messy_famine.sql", import.meta.url), "utf8");
@@ -805,7 +861,10 @@ describe("durable Dot Runner integration", () => {
       const appCall = vi.fn().mockResolvedValue({ status: "completed", result: { content: [{ type: "text", text: "synthetic gateway result" }] } });
       const gatewayTools = [{ name: "fixture:read_status", displayName: "Read fixture status", description: "Read a synthetic app", parametersSchema: { type: "object", properties: {}, additionalProperties: false }, risk: "read" }];
       registerAssignedMcpGateway(db, { listToolsForNamedGateway: vi.fn().mockResolvedValue(gatewayTools), executeTool: appCall } as unknown as ToolGatewayService);
-      if (provider === "openai_dot") await db.update(agents).set({ adapterConfig: { ...f.agent.adapterConfig, dotBindingId: f.snapshot.bindingId, dotWorkspaceAccess: true, dotAttachmentAccess: true } }).where(eq(agents.id, f.agent.id));
+      if (provider === "openai_dot") {
+        const [connectedAgent] = await db.select().from(agents).where(eq(agents.id, f.agent.id));
+        await db.update(agents).set({ adapterConfig: { ...connectedAgent!.adapterConfig, dotBindingId: f.snapshot.bindingId, dotWorkspaceAccess: true, dotAttachmentAccess: true } }).where(eq(agents.id, f.agent.id));
+      }
       vi.stubEnv("PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN", "fixture-cloud");
       try {
         for (const useRunnerd of [false, true]) {
