@@ -22,7 +22,7 @@ import {
   truncate,
   writeFile,
 } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { inspect } from "node:util";
 import { join } from "node:path";
@@ -2518,6 +2518,98 @@ describe("remote provider checkpoint snapshots", () => {
 });
 
 describe("remote provider checkpoint restores", () => {
+  it("stages and verifies read-only context with non-contiguous archive entries", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-readonly-restore-"));
+    const sourcePath = join(root, "source");
+    const targetPath = join(root, "target with 'quotes'");
+    try {
+      await mkdir(join(sourcePath, "references", "agents"), { recursive: true });
+      await writeFile(join(sourcePath, "SKILL.md"), "skill");
+      await writeFile(join(sourcePath, "references", "guide.md"), "guide");
+      await writeFile(join(sourcePath, "references", "agents", "coder.md"), "coder");
+      for (const path of [sourcePath, join(sourcePath, "references"), join(sourcePath, "references", "agents")]) {
+        await chmod(path, 0o555);
+      }
+      for (const path of [join(sourcePath, "SKILL.md"), join(sourcePath, "references", "guide.md"), join(sourcePath, "references", "agents", "coder.md")]) {
+        await chmod(path, 0o444);
+      }
+      const archive = execFileSync("tar", [
+        "--no-recursion", "--no-xattrs", "-czf", "-", "-C", sourcePath,
+        ".", "./references", "./SKILL.md", "./references/agents",
+        "./references/guide.md", "./references/agents/coder.md",
+      ], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+      const execute = vi.fn(async (command: { command: string; args: string[] }) => {
+        const result = spawnSync(command.command, command.args, {
+          input: archive.toString("base64"),
+          encoding: "utf8",
+          env: { ...process.env },
+        });
+        return { exitCode: result.status, timedOut: false, stdout: result.stdout, stderr: result.stderr };
+      });
+      for (let pass = 0; pass < 2; pass++) {
+        await stageRemoteRunnerDirectory({
+          target: { kind: "remote", transport: "ssh", remoteCwd: root } as never,
+          runner: { execute } as never,
+          sourcePath,
+          targetPath,
+          mode: 0o555,
+        });
+      }
+      expect(await readFile(join(targetPath, "references", "agents", "coder.md"), "utf8")).toBe("coder");
+      expect(await readFile(join(targetPath, "references", "guide.md"), "utf8")).toBe("guide");
+      expect(await readFile(join(targetPath, "SKILL.md"), "utf8")).toBe("skill");
+      expect((await lstat(join(targetPath, "references"))).mode & 0o777).toBe(0o500);
+      expect((await lstat(targetPath)).mode & 0o777).toBe(0o555);
+      const corruptedFile = join(targetPath, "references", "agents", "coder.md");
+      await chmod(corruptedFile, 0o600);
+      await writeFile(corruptedFile, "other");
+      await chmod(corruptedFile, 0o400);
+      await expect(stageRemoteRunnerDirectory({
+        target: { kind: "remote", transport: "ssh", remoteCwd: root } as never,
+        runner: { execute } as never,
+        sourcePath,
+        targetPath,
+        mode: 0o555,
+      })).rejects.toThrow("runner_remote_directory_staging_failed");
+      expect(await readFile(corruptedFile, "utf8")).toBe("other");
+    } finally {
+      for (const directory of [sourcePath, targetPath]) {
+        for (const path of [directory, join(directory, "references"), join(directory, "references", "agents")]) {
+          await chmod(path, 0o700).catch(() => undefined);
+        }
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects context staging through a symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-context-symlink-"));
+    const sourcePath = join(root, "source");
+    const preservedPath = join(root, "preserved");
+    const targetPath = join(root, "target");
+    try {
+      await mkdir(sourcePath);
+      await mkdir(preservedPath);
+      await writeFile(join(preservedPath, "sentinel"), "preserved");
+      await symlink(preservedPath, targetPath);
+      const execute = vi.fn(async (command: { command: string; args: string[]; stdin?: string }) => {
+        const result = spawnSync(command.command, command.args, { input: command.stdin, encoding: "utf8" });
+        return { exitCode: result.status, timedOut: false, stdout: result.stdout, stderr: result.stderr };
+      });
+      await expect(stageRemoteRunnerDirectory({
+        target: { kind: "remote", transport: "ssh", remoteCwd: root } as never,
+        runner: { execute } as never,
+        sourcePath,
+        targetPath,
+        mode: 0o555,
+      })).rejects.toThrow("runner_remote_directory_staging_failed");
+      expect(await readFile(join(preservedPath, "sentinel"), "utf8")).toBe("preserved");
+      expect((await lstat(targetPath)).isSymbolicLink()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not upload excluded Codex scratch trees or credentials", async () => {
     const sourcePath = await mkdtemp(
       join(tmpdir(), "paperclip-codex-restore-source-"),

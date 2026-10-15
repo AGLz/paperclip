@@ -10288,8 +10288,12 @@ export async function stageRemoteRunnerDirectory(input: {
         stagingRoot = mkdtempSync(join(tmpdir(), "paperclip-runner-restore-"));
         const archive = execFileSync(
           "tar",
-          [...excludeArgs, "-czf", "-", "-C", input.sourcePath, "."],
-          { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+          [...excludeArgs, "--no-xattrs", "-czf", "-", "-C", input.sourcePath, "."],
+          {
+            encoding: "buffer",
+            maxBuffer: 64 * 1024 * 1024,
+            env: { ...process.env, COPYFILE_DISABLE: "1" },
+          },
         );
         execFileSync("tar", ["-xzf", "-", "-C", stagingRoot], {
           input: archive,
@@ -10317,14 +10321,28 @@ export async function stageRemoteRunnerDirectory(input: {
   }
   const archive = execFileSync(
     "tar",
-    [...excludeArgs, "-czf", "-", "-C", input.sourcePath, "."],
-    { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+    [...excludeArgs, "--no-xattrs", "-czf", "-", "-C", input.sourcePath, "."],
+    {
+      encoding: "buffer",
+      maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    },
   );
   const escapedTarget = input.targetPath.replaceAll("'", "'\\''");
+  const compareImmutable = `const fs=require("node:fs"),p=require("node:path");function same(a,b){const x=fs.lstatSync(a),y=fs.lstatSync(b);if((x.mode&511)!==(y.mode&511))return false;if(x.isDirectory())return y.isDirectory()&&fs.readdirSync(a).every(n=>same(p.join(a,n),p.join(b,n)));return x.isFile()&&y.isFile()&&fs.readFileSync(a).equals(fs.readFileSync(b));}try{process.exit(same(process.argv[1],process.argv[2])?0:1)}catch{process.exit(1)}`;
+  const immutableStage = (input.mode & 0o222) === 0
+    ? `staging=$(mktemp -d) && mkdir "$staging/compare" || exit 1; ` +
+      `trap 'find "$staging" -type d -exec chmod u+w {} +; rm -rf -- "$staging"' EXIT; ` +
+      `base64 -d > "$staging/archive" && ` +
+      `tar "$@" -xzf "$staging/archive" -C "$staging/compare" && ` +
+      `chmod ${input.mode.toString(8)} "$staging/compare" || exit 1; ` +
+      `if node -e '${compareImmutable}' "$staging/compare" '${escapedTarget}'; then exit 0; fi; ` +
+      `tar "$@" -xzf "$staging/archive" -C '${escapedTarget}'`
+    : `base64 -d | tar "$@" -xzf - -C '${escapedTarget}'`;
   const script =
-    `umask 077; mkdir -p '${escapedTarget}' && ` +
-    `base64 -d | tar -xzf - -C '${escapedTarget}' && ` +
-    `chmod ${input.mode.toString(8)} '${escapedTarget}'`;
+    `case "$(tar --version 2>/dev/null)" in *"GNU tar"*) set -- --delay-directory-restore ;; *) set -- ;; esac; ` +
+    `umask 077; test ! -L '${escapedTarget}' && mkdir -p '${escapedTarget}' && ` +
+    `{ ${immutableStage}; } && chmod ${input.mode.toString(8)} '${escapedTarget}'`;
   const result = await input.runner.execute({
     command: "sh",
     args: ["-c", script],
