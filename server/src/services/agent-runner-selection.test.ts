@@ -409,6 +409,17 @@ describe("Codex creation runner contract", () => {
 describe("Claude runner defaults", () => {
   const mac = { driver: "local", platform: "darwin", architecture: "arm64" };
   beforeEach(() => { state.disabled = []; state.overridden.clear(); });
+  it.each(["arm64"])("keeps Darwin SSH %s automatic selection Legacy while preserving explicit assets", architecture => {
+    const target = { driver: "ssh", platform: "darwin", architecture };
+    expect(agentRunnerAvailability("claude_local", target)).toEqual({ supportedRunners: ["paperclip", "legacy"], defaultRunner: "legacy" });
+    const config = { model: "custom-model", dangerouslySkipPermissions: false };
+    expect(resolveNewAgentRunner({ adapterType: "claude_local", target, adapterConfig: config })).toEqual({ adapterType: "claude_local", adapterConfig: config });
+    const assets = { runnerRemoteProviderPackPath: "/operator/mac-pack", runnerRemoteBinaryPath: "/operator/mac-daemon" };
+    expect(resolveNewAgentRunner({ adapterType: "claude_local", target, runner: "paperclip", adapterConfig: assets }))
+      .toMatchObject({ adapterType: "paperclip_runner", adapterConfig: { ...assets, provider: "acpx", acpxAgent: "claude" } });
+    const saved = { adapterType: "paperclip_runner", adapterConfig: { ...assets, provider: "acpx", acpxAgent: "claude" }, target };
+    expect(resolveNewAgentRunner(saved)).toEqual({ adapterType: saved.adapterType, adapterConfig: saved.adapterConfig });
+  });
   it("saves native Claude with Opus 5.5, preserving credentials and shared settings", () => {
     const config = { env: { ANTHROPIC_API_KEY: { type: "secret_ref", secretId: "key" } }, instructionsFilePath: "/workspace/AGENTS.md", timeoutSec: 180, dangerouslySkipPermissions: true };
     const result = resolveNewAgentRunner({ adapterType: "claude_local", target: mac, adapterConfig: config });

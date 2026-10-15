@@ -35,7 +35,8 @@ export function agentRunnerAvailability(harness: string, target: RunnerTarget = 
     && (harness === "claude_local"
       ? !!target.platform && paperclipRunnerSupportsPlatform(harness, target.platform, target.architecture ?? "", target.libc, target.glibcVersion)
       : !target.platform || paperclipRunnerSupportsPlatform(harness, target.platform, target.architecture ?? "", target.libc, target.glibcVersion));
-  return { supportedRunners: supported ? ["paperclip", "legacy"] : ["legacy"], defaultRunner: supported ? "paperclip" : "legacy" };
+  const automatic = supported && !(harness === "claude_local" && target.driver === "ssh" && target.platform === "darwin");
+  return { supportedRunners: supported ? ["paperclip", "legacy"] : ["legacy"], defaultRunner: automatic ? "paperclip" : "legacy" };
 }
 
 function incompatible(fields: string[]): never {
@@ -105,7 +106,7 @@ export function resolveNewAgentRunner(input: AgentRunnerSelection): { adapterTyp
     return { adapterType: "codex_local", adapterConfig: { ...config, dangerouslyBypassApprovalsAndSandbox: config.dangerouslyBypassApprovalsAndSandbox ?? true } };
   }
   if (native && harness !== "codex_local" && choice === "paperclip") return { adapterType, adapterConfig: normalizeLegacyRunnerProvider(config) };
-  if (availability.defaultRunner !== "paperclip") throw unprocessable(input.target?.driver === "sandbox"
+  if (!availability.supportedRunners.includes("paperclip")) throw unprocessable(input.target?.driver === "sandbox"
     ? "Paperclip Runner is unavailable for this sandbox. Choose an immutable OCI image digest and run its environment connection probe to qualify the OS, architecture and libc, or select Legacy runner in Advanced."
     : "Paperclip Runner is unavailable for this harness and environment. Select Legacy runner in Advanced.", { code: "agent_runner_unavailable" });
   if (native) return { adapterType, adapterConfig: normalizeLegacyRunnerProvider(config) };
