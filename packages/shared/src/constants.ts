@@ -639,6 +639,9 @@ export type RoutineConcurrencyPolicy = (typeof ROUTINE_CONCURRENCY_POLICIES)[num
 export const ROUTINE_CATCH_UP_POLICIES = ["skip_missed", "enqueue_missed_with_cap"] as const;
 export type RoutineCatchUpPolicy = (typeof ROUTINE_CATCH_UP_POLICIES)[number];
 
+export const ROUTINE_NOTIFY_POLICIES = ["silent", "alert", "always"] as const;
+export type RoutineNotifyPolicy = (typeof ROUTINE_NOTIFY_POLICIES)[number];
+
 export const ROUTINE_ACTIVITY_GATE_POLICIES = ["always", "require_external_activity"] as const;
 export type RoutineActivityGatePolicy = (typeof ROUTINE_ACTIVITY_GATE_POLICIES)[number];
 

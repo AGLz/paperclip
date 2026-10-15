@@ -484,6 +484,7 @@ export {
   ROUTINE_STATUSES,
   ROUTINE_CONCURRENCY_POLICIES,
   ROUTINE_CATCH_UP_POLICIES,
+  ROUTINE_NOTIFY_POLICIES,
   ROUTINE_TRIGGER_KINDS,
   ROUTINE_TRIGGER_SIGNING_MODES,
   ROUTINE_VARIABLE_TYPES,
@@ -672,6 +673,7 @@ export {
   type RoutineStatus,
   type RoutineConcurrencyPolicy,
   type RoutineCatchUpPolicy,
+  type RoutineNotifyPolicy,
   type RoutineTriggerKind,
   type RoutineTriggerSigningMode,
   type RoutineVariableType,
@@ -2887,3 +2889,11 @@ export * from "./fast-response.js";
 export { HUMAN_TASK_ORIGIN_KINDS, isAgentCreatedIssue, type IssueCreationSourceFields } from "./issue-creation-source.js";
 
 export * from "./grok-bot.js";
+
+export {
+  SILENT_NOTIFY_DISPOSITION_OVERRIDE,
+  buildRoutineRunBrief,
+  deriveNotifyPolicyFromDescription,
+  isRoutineNotifyPolicy,
+  resolveRoutineNotifyPolicy,
+} from "./routine-notify-policy.js";
