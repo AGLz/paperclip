@@ -79,7 +79,9 @@ General server shards run at most two test files at a time in separate Vitest
 forks. Each file retains its own home, config and process state, and its test
 cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
 serial because the database is shared. Unsharded local tests, route/authz lanes,
-chat integration and native Runner lanes retain their existing concurrency.
+and native Runner lanes retain their existing concurrency. Sharded chat jobs run
+two independent partitions, each with its own embedded PostgreSQL, home and
+config; an explicit shared test database retains one partition per job.
 The Runner transport lease-expiry and cold-admission regressions live in their
 own file so those real-clock waits overlap other files in the existing pool.
 

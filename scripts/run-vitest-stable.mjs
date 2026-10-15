@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -377,7 +377,7 @@ function selectSerializedSuites(routeTests, shardIndex, shardCount) {
   return shardFiles.map((file) => byRepoPath.get(file));
 }
 
-function runVitest(args, label, testShard = null) {
+async function runVitest(args, label, testShard = null) {
   console.log(`\n[test:run] ${label}`);
   invocationIndex += 1;
   const tempRootParent = process.platform === "win32" ? os.tmpdir() : "/tmp";
@@ -408,7 +408,7 @@ function runVitest(args, label, testShard = null) {
         ...filters, "--allowOnly=false", "--includeTaskLocation", `--json=${output}`], {
         cwd: repoRoot, env, stdio: "inherit",
       });
-      if (result.error || result.status !== 0) fail(`Vitest collection failed: ${result.error?.message ?? result.status}`);
+      if (result.error || result.status !== 0) throw new Error(`Vitest collection failed: ${result.error?.message ?? result.status}`);
       return JSON.parse(readFileSync(output, "utf8"));
     };
     const allCollected = collect(args, "all");
@@ -434,27 +434,27 @@ function runVitest(args, label, testShard = null) {
     const runFilters = selected.lines.map((line) => `${chatSuite}:${chatSuiteRunLine(sourceLines, line)}`);
     args = [...args.filter((arg) => arg !== chatSuite), ...runFilters, "--allowOnly=false"];
   }
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
-    cwd: repoRoot,
-    env: invocationEnv("vitest", env),
-    stdio: "inherit",
+  await new Promise((resolve, reject) => {
+    const child = spawn("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
+      cwd: repoRoot,
+      env: invocationEnv("vitest", env),
+      stdio: "inherit",
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${label} failed (${signal ?? code})`));
+    });
   });
-  if (result.error) {
-    console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);
-    process.exit(1);
-  }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
 }
 
-function runGeneralSuites(routeTests) {
+async function runGeneralSuites(routeTests) {
   for (const groupName of generalGroupNames) {
-    runGeneralGroup(routeTests, groupName);
+    await runGeneralGroup(routeTests, groupName);
   }
 }
 
-function runProjectGroup(projects, groupName, shardIndex = null, shardCount = null) {
+async function runProjectGroup(projects, groupName, shardIndex = null, shardCount = null) {
   // With shard args, lean on Vitest's native --shard: each matrix job runs the
   // same per-project invocations but only its slice of each project's test
   // files. Vitest's sharding is deterministic for an identical file list, so
@@ -463,18 +463,32 @@ function runProjectGroup(projects, groupName, shardIndex = null, shardCount = nu
     shardCount !== null && shardCount > 1 ? [`--shard=${shardIndex + 1}/${shardCount}`] : [];
   const shardSuffix = shardArgs.length > 0 ? ` shard ${shardIndex + 1}/${shardCount}` : "";
   for (const project of projects) {
-    runVitest(["--project", project, ...shardArgs], `${groupName} project ${project}${shardSuffix}`);
+    await runVitest(["--project", project, ...shardArgs], `${groupName} project ${project}${shardSuffix}`);
   }
 }
 
-function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
+function chatShardWorkers(index, count) {
+  const workers = count > 1 && !process.env.PAPERCLIP_TEST_DATABASE_URL ? 2 : 1;
+  return Array.from({ length: workers }, (_, offset) => ({
+    index: (index ?? 0) * workers + offset,
+    count: (count ?? 1) * workers,
+  }));
+}
+
+async function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = null) {
   if (groupName === generalChatGroupName) {
-    runVitest(["--project", "@paperclipai/server", ...serializedServerVitestArgs, chatSuite],
-      "chat integration test shard", { index: shardIndex ?? 0, count: shardCount ?? 1 });
+    // Each invocation gets its own temporary home and embedded PostgreSQL.
+    // Wait for both children even on failure so no sibling is abandoned.
+    const results = await Promise.allSettled(chatShardWorkers(shardIndex, shardCount).map((shard) =>
+      runVitest(["--project", "@paperclipai/server", ...serializedServerVitestArgs, chatSuite],
+        "chat integration test shard", shard),
+    ));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
     return;
   }
   if (groupName === generalServerNativeRunnerGroupName) {
-    runVitest(
+    await runVitest(
       ["--project", "@paperclipai/server", ...serializedServerVitestArgs, ...nativeRunnerSuites],
       "native runner vertical-slice suite",
     );
@@ -497,7 +511,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
         return;
       }
 
-      runVitest(
+      await runVitest(
         [
           "--project",
           "@paperclipai/server",
@@ -518,7 +532,7 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
     for (const suite of excludedSuites) {
       excludeRouteArgs.push("--exclude", suite.replace(/^server\//, ""));
     }
-    runVitest(
+    await runVitest(
       [
         "--project",
         "@paperclipai/server",
@@ -535,31 +549,31 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
     // 31371439296, 2026-08-10, where workspaces-a was the slowest PR check).
     // Its 439 test files shard cleanly with Vitest's native --shard, so the
     // lane splits across runners without a duration manifest.
-    runProjectGroup(generalWorkspacesAProjects, groupName, shardIndex, shardCount);
+    await runProjectGroup(generalWorkspacesAProjects, groupName, shardIndex, shardCount);
     return;
   }
 
   if (groupName === generalWorkspacesBGroupName) {
-    runProjectGroup(generalWorkspacesBProjects, groupName);
+    await runProjectGroup(generalWorkspacesBProjects, groupName);
     return;
   }
 
   if (groupName === generalWorkspacesCGroupName) {
-    runProjectGroup(generalWorkspacesCProjects, groupName);
+    await runProjectGroup(generalWorkspacesCProjects, groupName);
     return;
   }
 
   fail(`Unknown group "${groupName}".`);
 }
 
-function runSerializedSuites(routeTests, shardIndex, shardCount) {
+async function runSerializedSuites(routeTests, shardIndex, shardCount) {
   const shardTests = selectSerializedSuites(routeTests, shardIndex, shardCount);
   console.log(
     `\n[test:run] serialized shard ${shardIndex + 1}/${shardCount} running ${shardTests.length} of ${routeTests.length} suites`,
   );
 
   if (shardTests.length > 0) {
-    runVitest(
+    await runVitest(
       [
         "--project",
         "@paperclipai/server",
@@ -630,6 +644,8 @@ if (options.dryRun) {
                   generalServerShardDurations,
                 )
               : null,
+        chatVitestShards: options.group === generalChatGroupName
+          ? chatShardWorkers(options.shardIndex, options.shardCount) : null,
         workspaceProjects:
           options.group === generalWorkspacesAGroupName
             ? generalWorkspacesAProjects
@@ -652,14 +668,19 @@ if (options.dryRun) {
   process.exit(0);
 }
 
-if (options.mode === generalModeName || options.mode === allModeName) {
-  if (options.group) {
-    runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
-  } else {
-    runGeneralSuites(routeTests);
+try {
+  if (options.mode === generalModeName || options.mode === allModeName) {
+    if (options.group) {
+      await runGeneralGroup(routeTests, options.group, options.shardIndex, options.shardCount);
+    } else {
+      await runGeneralSuites(routeTests);
+    }
   }
-}
 
-if (options.mode === serializedModeName || options.mode === allModeName) {
-  runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+  if (options.mode === serializedModeName || options.mode === allModeName) {
+    await runSerializedSuites(routeTests, options.shardIndex ?? 0, options.shardCount ?? 1);
+  }
+} catch (error) {
+  console.error(`[test:run] ${error.message}`);
+  process.exitCode = 1;
 }
