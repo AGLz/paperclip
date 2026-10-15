@@ -7906,6 +7906,86 @@ describe("native warm session supervision", () => {
     }
   });
 
+  it.each(["idle expiry first", "turn first"])("serializes idle expiry and turn admission: %s", async (order) => {
+    const stateBase = await mkdtemp(join(tmpdir(), "paperclip-idle-race-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    process.env.PAPERCLIP_HOME = stateBase;
+    let finishClose!: () => void;
+    const closing = new Promise<void>((resolve) => { finishClose = resolve; });
+    const close = vi.fn(() => closing);
+    const idleTimeoutMs = 200;
+    try {
+      const first = {
+        ...execution,
+        binding: {
+          ...execution.binding,
+          runId: "run-idle-race-first",
+          executionWorkspaceId: "workspace-idle-race",
+        },
+        session: {
+          ...execution.session,
+          normalizedSessionId: "session-idle-race",
+          lifecyclePolicy: { mode: "warm" as const, idleTimeoutMs },
+        },
+      } as NativeExecutionInputV1;
+      const result = {
+        result: { summary: "completed" },
+        terminal: { runTerminalState: "succeeded" },
+        turnId: "turn-idle-race",
+        normalizedSessionId: first.session.normalizedSessionId,
+        providerSessionId: "provider-idle-race",
+        driverKind: "test",
+        driverVersion: "1",
+        nativeEventCount: 1,
+        highestContiguousSourceSeq: 1,
+        usage: null,
+      };
+      state.execute.mockReset().mockImplementationOnce(async (options) => {
+        await options.onSession?.({ close });
+        return result;
+      });
+      await executePaperclipNativeSession({
+        db: leaseDb(first), execution: first,
+        runnerInstanceId: "runner-idle-race", useRunnerd: true,
+      });
+      const second = { ...first, binding: { ...first.binding, runId: "run-idle-race-second" } };
+      const reachedAdmission = new Error("test reached post-checkpoint admission");
+      state.stageNativeRunnerWakeAttachments.mockClear();
+      state.stageNativeRunnerWakeAttachments.mockImplementationOnce(async () => {
+        if (order === "turn first") {
+          // The idle window elapses while the continuation still prepares.
+          await new Promise((resolve) => setTimeout(resolve, idleTimeoutMs * 2));
+          expect(close).not.toHaveBeenCalled();
+        }
+        throw reachedAdmission;
+      });
+      if (order === "idle expiry first") {
+        await vi.waitFor(() => expect(close).toHaveBeenCalledOnce(), { timeout: 2_000 });
+      }
+      const continuation = executePaperclipNativeSession({
+        db: leaseDb(second), execution: second,
+        runnerInstanceId: "runner-idle-race", useRunnerd: true,
+      }).catch((error) => error);
+      if (order === "idle expiry first") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(state.stageNativeRunnerWakeAttachments).not.toHaveBeenCalled();
+        finishClose();
+      }
+      expect(await continuation).toBe(reachedAdmission);
+      expect(state.stageNativeRunnerWakeAttachments).toHaveBeenCalledOnce();
+      // A deferred idle owner still retires once the scope is released.
+      await vi.waitFor(() => expect(close).toHaveBeenCalledExactlyOnceWith({
+        reason: "warm native session idle timeout",
+      }), { timeout: 2_000 });
+    } finally {
+      finishClose();
+      await closeIdleWarmNativeSessionsForRestart();
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      await rm(stateBase, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])("checkpoints a busy warm session on release after the restart sweep: checkpoint fails=%s", async (checkpointFails) => {
     const checkpointError = new Error("restart checkpoint failed");
     let finishCheckpoint!: () => void;

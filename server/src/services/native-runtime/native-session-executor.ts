@@ -6162,15 +6162,35 @@ async function releaseWarmNativeSession(
     } finally { entry.busy = false; }
     return;
   }
+  armWarmNativeSessionIdleTimer(sessionId, entry, idleTimeoutMs);
+}
+
+function armWarmNativeSessionIdleTimer(
+  sessionId: string,
+  entry: WarmNativeSession,
+  idleTimeoutMs: number,
+): void {
   entry.idleTimer = setTimeout(() => {
     const current = warmNativeSessions.get(sessionId);
     if (current !== entry || current.busy) return;
+    if (current.preparingRunId || executingRunnerdSessionScopes.has(sessionId)) {
+      // A continuation has reserved this scope and is still preparing. It
+      // verifies this idle owner as the prior run's authority; suspending it
+      // underneath that check makes the ready state look indeterminate.
+      armWarmNativeSessionIdleTimer(sessionId, current, idleTimeoutMs);
+      return;
+    }
     current.busy = true;
     current.closeOnReleaseReason = "warm native session idle timeout";
-    void closeWarmNativeSession(current, current.closeOnReleaseReason)
+    const closing = closeWarmNativeSession(current, current.closeOnReleaseReason)
       .then(() => { if (warmNativeSessions.get(sessionId) === current) warmNativeSessions.delete(sessionId); })
       .catch(() => { if (!current.instructionWorkingCopy?.runId && warmNativeSessions.get(sessionId) === current) warmNativeSessions.delete(sessionId); })
-      .finally(() => { current.busy = false; });
+      .finally(() => {
+        current.busy = false;
+        if (closingWarmNativeSessions.get(sessionId) === closing) closingWarmNativeSessions.delete(sessionId);
+      });
+    // Admission waits for this checkpoint like a restart sweep's close.
+    closingWarmNativeSessions.set(sessionId, closing);
   }, idleTimeoutMs);
   entry.idleTimer.unref();
 }
