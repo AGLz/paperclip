@@ -419,6 +419,14 @@ interaction/approval that names a responder, or an `unblockDescriptor` with
 `{owner, action}`. Alert/always routines keep the existing board escalation on
 exhaustion. See issue AGL-240.
 
+**R5:** A recovery action with `ownerType: board` that has **no** pending
+interaction or approval naming a human responder must not auto-retry on its own
+(the historical ~2 minute zombie loop). Paperclip applies a retry ceiling and
+expires the action with inspectable `recoveryBudget` evidence (`state:
+exhausted`, reason `board_without_named_responder`), clearing automatic
+wake/monitor paths. When a pending interaction or approval already names a
+responder, the current human-in-the-loop wait is preserved. See issue AGL-242.
+
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 
 This is a visibility contract, not an auto-completion contract. If Paperclip cannot safely infer the next action, it should surface the ambiguity with a blocked state, a visible notice, or an explicit recovery action. It must not silently mark work done from prose comments or guess that a dependency is complete.
