@@ -8,11 +8,12 @@ export interface MuseBinding {
   paired: boolean; receiverDetected: boolean; backgroundReplyVerified: boolean;
   pairingExpiresAt: string | null; challengeExpiresAt: string | null;
   lastReceiverContactAt: string | null; lastWorkerActivityAt: string | null; lastVerifiedReplyAt: string | null;
-  contactPersistenceLagMs: number; clientVersion: string | null;
+  credentialState: "pending" | "active" | "expired" | "revoked"; refreshExpiresAt: string | null;
+  receiverContactTrust: "public_untrusted"; contactPersistenceLagMs: number; clientVersion: string | null;
   qualification: { id: string; expiresAt: string } | null;
   liveAssignments: number; uncertainOperations: number; pendingInputs: number;
-  cleanup: { pending: boolean; detectorRemovalRequested?: boolean; detectorRemoved: boolean; workerQuiescenceReported: boolean; expiresAt: string | null };
-  stop: { status: "none" | "cannot_confirm" | "worker_reported" | "operator_attested"; nativeEffectsUnknown: boolean; boundary: MuseStopBoundary | null };
+  cleanup: { authenticatedAfterRevocation?: boolean; pending: boolean; detectorRemovalRequested?: boolean; detectorRemoved: boolean; workerQuiescenceReported: boolean; expiresAt: string | null };
+  stop: { status: "none" | "cannot_confirm" | "worker_reported" | "operator_attested"; nativeEffectsUnknown: boolean; boundary: MuseStopBoundary | null; bindingRevision: number | null };
 }
 export interface MuseInvitation { agent: { id: string; name: string; status: string }; approvalId: string | null; binding: MuseBinding | null }
 export interface MuseConnection {
@@ -21,7 +22,7 @@ export interface MuseConnection {
 }
 export interface MusePairing {
   bindingId: string; generation: number; revision: number; ticket: string; expiresAt: string;
-  setupInstruction: string; assetVersion: 1;
+  setupInstruction: string; assetVersion: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 }
 export interface MuseVerifyResult { bindingId: string; generation: number; revision: number; expiresAt: string; status: "pending" }
 export interface MuseInvitationInput { name: string; role: string }
@@ -34,7 +35,7 @@ export interface MuseQualificationBeginResult { qualificationId: string; started
 export interface MuseQualificationEvidence {
   qualificationId: string; startedAt: string; expiresAt: string; stoppedAt: string | null; deadlineEnforcedAt: string | null;
   authorityRevoked: boolean; persistenceLagMs: number; cadenceEvidenceComplete: boolean;
-  contacts: Array<{ replicaId: string; bucketAt: string; firstAt: string; lastAt: string; contacts: number; gapsAtMostSevenSeconds: number; maxGapMs: number; timestamps: string[]; incomplete: boolean }>;
+  contacts: Array<{ trust: "public_untrusted"; replicaId: string; bucketAt: string; firstAt: string; lastAt: string; contacts: number; gapsAtMostSevenSeconds: number; maxGapMs: number; timestamps: string[]; incomplete: boolean }>;
   assignments: Array<{ id: string; runId: string; issueId: string | null; status: string; offeredAt: string; claimedAt: string | null; nativeAcceptedAt: string | null; acceptedResultAt: string | null; finalizedAt: string | null }>;
   idleWindows: Array<{ startedAt: string; endedAt: string }>;
 }
