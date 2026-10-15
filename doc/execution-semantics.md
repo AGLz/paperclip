@@ -410,6 +410,15 @@ That override is mandatory when the source routine's typed `notifyPolicy` is
 `silent`. The stored routine brief is left intact — only the corrective wake
 instruction carries the override. See issue AGL-239.
 
+**R3:** When a `routine_execution` issue with typed `notifyPolicy === silent`
+exhausts the successful-run disposition handoff (`successful_run_missing_state`
+after the bounded corrective attempt) **and** the source run succeeded, Paperclip
+resolves the issue **`done`**, never `blocked`. Silent notify is not a waiting
+path. `blocked` still requires one of: a first-class blocker chain, a pending
+interaction/approval that names a responder, or an `unblockDescriptor` with
+`{owner, action}`. Alert/always routines keep the existing board escalation on
+exhaustion. See issue AGL-240.
+
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 
 This is a visibility contract, not an auto-completion contract. If Paperclip cannot safely infer the next action, it should surface the ambiguity with a blocked state, a visible notice, or an explicit recovery action. It must not silently mark work done from prose comments or guess that a dependency is complete.
