@@ -419,6 +419,14 @@ interaction/approval that names a responder, or an `unblockDescriptor` with
 `{owner, action}`. Alert/always routines keep the existing board escalation on
 exhaustion. See issue AGL-240.
 
+**R4:** Resolving a disposition recovery (`missing_disposition` /
+`deliberate_wait_without_target`) on a `routine_execution` issue means **choosing
+a disposition** — typically `outcome: false_positive` with
+`sourceIssueStatus: done`. That path must not require a first-class blocker the
+routine never had. Resolving with `outcome: blocked` still requires an unresolved
+first-class blocker (real dependency dispositions). See issue AGL-241; CTO
+decision recorded on AGL-651.
+
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 
 This is a visibility contract, not an auto-completion contract. If Paperclip cannot safely infer the next action, it should surface the ambiguity with a blocked state, a visible notice, or an explicit recovery action. It must not silently mark work done from prose comments or guess that a dependency is complete.
