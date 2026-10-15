@@ -23,6 +23,8 @@ import { type GrokRoutineWake } from "../services/grok-bot/webhook.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import { admitExplicitNativeContinuation } from "../services/explicit-native-continuation.js";
 import { hasRequiredWorkspaceRecovery } from "../services/workspace-restore-recovery-state.js";
+import { heartbeatService } from "../services/heartbeat.js";
+import { environmentRuntimeService } from "../services/environment-runtime.js";
 
 let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
 let db: ReturnType<typeof createDb>;
@@ -102,6 +104,63 @@ async function acceptance(f: Awaited<ReturnType<typeof fixture>>, work: typeof d
 }
 
 describe("durable Grok routine qualification", () => {
+  it("preflights current connection authority without treating database failures as readiness", async () => {
+    const f = await fixture();
+    const broker = dotRunnerBroker(db);
+    const canStart = () => broker.canStartNewWork(f.company.id, f.agent.id, f.pairing.bindingId);
+    expect(await canStart()).toBe(false);
+    const row = await verification(f);
+    await f.service.send(f.company.id, f.agent.id, row.id);
+    await f.service.acknowledge(f.principal, acknowledgement(row));
+    expect(await canStart()).toBe(true);
+    expect(await broker.canStartNewWork(randomUUID(), f.agent.id, f.pairing.bindingId)).toBe(false);
+    expect(await broker.canStartNewWork(f.company.id, f.agent.id, randomUUID())).toBe(false);
+    await db.update(grokBotRoutines).set({ recoveryRequiredAt: new Date(), recoveryReason: "work_session" })
+      .where(eq(grokBotRoutines.bindingId, f.pairing.bindingId));
+    expect(await canStart()).toBe(false);
+    await db.update(grokBotRoutines).set({ recoveryRequiredAt: null, recoveryReason: null })
+      .where(eq(grokBotRoutines.bindingId, f.pairing.bindingId));
+    await db.update(mcpOauthGrants).set({ revokedAt: new Date() }).where(eq(mcpOauthGrants.id, f.principal.grant.id));
+    expect(await canStart()).toBe(false);
+    const unavailable = new Error("synthetic database unavailable");
+    vi.spyOn(broker, "snapshot").mockRejectedValueOnce(unavailable);
+    await expect(canStart()).rejects.toBe(unavailable);
+  });
+
+  it("holds public heartbeat input before claiming a Runner while Grok recovery is required", async () => {
+    const f = await fixture();
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, f.agent.id));
+    const row = await verification(f);
+    await f.service.send(f.company.id, f.agent.id, row.id);
+    await f.service.acknowledge(f.principal, acknowledgement(row));
+    await db.update(grokBotRoutines).set({ recoveryRequiredAt: new Date(), recoveryReason: "work_session" })
+      .where(eq(grokBotRoutines.bindingId, f.pairing.bindingId));
+    const [task] = await db.insert(issues).values({ companyId: f.company.id, title: "Wait for Grok inspection",
+      status: "todo", assigneeAgentId: f.agent.id, responsibleUserId: f.principal.grant.userId }).returning();
+    const runtime = environmentRuntimeService(db);
+    const acquire = vi.spyOn(runtime, "acquireRunLease").mockRejectedValue(new Error("Unexpected provider allocation"));
+    const heartbeat = heartbeatService(db, { environmentRuntime: runtime });
+    try {
+      await heartbeat.wakeup(f.agent.id, { source: "assignment", reason: "issue_assigned",
+        requestedByActorType: "user", requestedByActorId: f.principal.grant.userId,
+        payload: { issueId: task.id }, contextSnapshot: { issueId: task.id } });
+      await heartbeat.drainActiveRunExecutions();
+      for (let poll = 0; poll < 3; poll++) await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+      const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agent.id));
+      expect(runs).toEqual([expect.objectContaining({ status: "queued", startedAt: null })]);
+      expect(await db.select().from(environmentLeases).where(eq(environmentLeases.companyId, f.company.id))).toEqual([]);
+      expect(await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.agentId, f.agent.id))).toEqual([]);
+      expect(await db.select().from(grokBotDispatches).where(eq(grokBotDispatches.bindingId, f.pairing.bindingId)))
+        .toEqual([expect.objectContaining({ id: row.id, status: "acknowledged" })]);
+      expect(acquire).not.toHaveBeenCalled();
+      expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].status).toBe("todo");
+    } finally {
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agent.id));
+      await heartbeat.drainActiveRunExecutions();
+    }
+  });
+
   it("receives an authenticated Grok acknowledgement through the actual MCP transport without exposing personal or Dot event tools", async () => {
     const f = await fixture(); const row = await verification(f);
     await f.service.send(f.company.id, f.agent.id, row.id);

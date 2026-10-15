@@ -1,6 +1,6 @@
 # Grok Bot production readiness
 
-Status as of October 15: real assigned and Bot-initiated tasks reach canonical completion. The active-session wake correction is merged. The proactive admission echo correction is merged and source-verified; image publication and a real no-echo repeat remain pending. A real controller restart and active Stop diagnostic passed their authority checks; Stop also exposed a false workspace-repair hold, now under correction. Production acceptance is incomplete. The current release goal and matrix below supersede the earlier dated campaign entries. Historical successes and failures remain evidence for the revisions actually tested.
+Status as of October 15: a real Bot-initiated repeat passed with one task, one run, seven completed operations, canonical Done, no assignment webhook and successful cleanup on packaged Core ea4aa185. The false file-recovery correction is merged and deployed as Core 5a9e6b63; historical inspection archived the incorrect obligation and fresh verification passed. Further assigned work is blocked by a provider-reported routine-start rate limit. Stop then exposed a separate queue-admission defect: pending work repeatedly allocated a Runner before discovering the connection hold. The qualification agent is paused and all affected leases are cleaned up. Production acceptance remains incomplete.
 
 ## Current production finish line — October 14
 
@@ -12,8 +12,8 @@ There is no testing call, case-count, token or spending cap. The former six-case
 | --- | --- | --- |
 | Ordinary onboarding works | Actual Grok UI, fixed agent consent, saved setup, wrong-key behavior, authenticated challenge, refresh, reconnect and revocation | Resumed real Grok authorization, saved setup Done, authenticated routine challenge and automatic refresh passed on the October 15 serving revision. Runtime reconnect copy fix is merged; verify its published UI and fresh production setup next. |
 | Assigned work reaches a usable result | One actual managed workflow: progress, question and answer, document, downloaded file/hash, canonical completion or review and cleanup | A preliminary comparison task on serving Core ff0 completed progress → question → answer → report/CSV → canonical Done, with both cleanup receipts. The cited CSV downloads with the exact publication hash. Two distinct CSV uploads accompanied an active-session result wake; correct that wake behavior and requalify the final candidate. |
-| Bot initiates governed work | Real-client task creation/claim/completion with stable receipts and no outbound echo or duplicate effects | A real idle-conversation request created one task and one managed run, saved a 100-word report, reached accepted Done and cleaned up its lease. A delayed-admission wake and two acceptance attempts were also recorded. Functional completion passed; no-echo acceptance failed. Requalify the correction. |
-| Recovery and authority are reliable | Healthy work past the prior five-minute failure window; actual controller restart preserving assignment/session/process and no duplicate wake; Stop, pause, reassignment, revocation, stale calls, queues and cleanup | A real managed diagnostic ran for 13 minutes 44 seconds, survived an actual same-image controller restart with the original assignment/session/process/lease, completed canonically and cleaned up without another wake. Active Stop fenced its work, rejected a real stale progress update, kept its checkpoint unchanged and cleaned up. Cancellation also created a false file-repair hold despite an admitted workspace-access-none contract; correct and requalify that recovery behavior. These diagnostics ran on Core 11d, not the final release image. |
+| Bot initiates governed work | Real-client task creation/claim/completion with stable receipts and no outbound echo or duplicate effects | A real idle-conversation repeat on packaged Core ea4aa185 created one task and one run, read a public source marker with Grok's own tools, saved its report, reached canonical Done and cleaned up. One acceptance and seven operations completed, with no assignment webhook. The earlier duplicate-wake failure remains historical evidence; its correction passed this repeat. |
+| Recovery and authority are reliable | Healthy work past the prior five-minute failure window; actual controller restart preserving assignment/session/process and no duplicate wake; Stop, pause, reassignment, revocation, stale calls, queues and cleanup | The Core 11d diagnostic survived an actual restart and 13 minutes 44 seconds, then completed and cleaned up. Active Stop denied a real stale mutation. Packaged Core 5a9e6b63 later archived the historical false file hold and stopped an unaccepted session without another file obligation. Queued preparation then churned behind the connection recovery hold; correct that admission gate and repeat the final workflow, restart and active Stop. The original October 14 exit cause remains unproven. |
 | One identifiable reviewed candidate passes source gates | Focused protocol/auth/Runner/UI tests, full CI/typecheck/tests/build/token/Storybook evidence and exact artifacts | Active-session wake correction #16394 merged with 55 passing checks, two optional skips and review 5/5. The proactive echo correction started from master 7fc2dc8b3236e1149ae32756b6153a503623404b and was rebased onto freshly fetched master 250429942e27d568f20d3bc7dddcfc84a666480a before submission. Two regression cases reproduce the real delayed-admission wake before the fix. All 214 focused protocol/auth/question checks pass, including 80 Grok and Dot checks. Repository typecheck/build, token gates, the 2,731-story structure and Storybook build pass. Fresh CI, review, publication and the real no-echo repeat remain required. |
 | Production opt-in is delivered and smoke-tested | Staging acceptance, correct served Core/distribution/Runner, normal editable opt-in controls/defaults, actual production Bot workflow and inspectable task/output links | Cloud opt-in policy and release-guide corrections are merged. Staging Cloud provenance and minimal feature values were verified, with Dot disabled and defaults unchanged. The corrected wake candidate, remaining real-client cases, ordinary production opt-in controls and production smoke are outstanding. |
 
@@ -40,6 +40,26 @@ The controlled recovery diagnostic preserved one original run for 824 seconds. T
 The active Stop diagnostic cancelled its run, fenced the assignment, kept the checkpoint at revision one and recorded successful sandbox cleanup. One planned negative probe in the real Grok client returned “Assignment authority expired or was revoked.” No late completion was accepted. Inspection found a generic workspace-repair obligation attached to an external native input that explicitly forbids workspace access. Four database regressions reproduce that obligation and its misleading recovery guidance. The correction keeps coordinator settlement, no-replay holds and native file safeguards while omitting file retention for an exact admitted workspace-less external contract. Repository typecheck and 68 focused file-recovery/cancellation checks pass; an assembled heartbeat regression exposed and preserved the coordinator-settlement requirement. Fresh review, full checks and deployed recovery remain required.
 
 Keep native providers and person-purpose MCP connections unchanged. No browser automation belongs in normal operation. Defer localhost relays, internal Grok APIs, marketplace distribution and Paperclip-connected third-party tools. Completion of a Paperclip work session does not assert remote Grok termination.
+
+## October 15 — queued admission during Grok recovery
+
+A real historical inspection on packaged Core `5a9e6b63` removed the false file
+obligation while preserving the old assignment fence and no-replay evidence.
+The routine returned an authenticated verification after one explicit retry of a
+confirmed rejection. A new task message then produced a new offered assignment.
+Grok rejected its webhook and its explicit retry with HTTP 400. A separate
+revoked-binding diagnostic identified `Automation run rate limit exceeded`.
+Included usage was still available; no documented cooldown or routine-start
+allowance was visible. No billing setting or provider limit was changed.
+
+Stopping that unaccepted session created no false file obligation. Pending work
+then made four failed preparation attempts with no new external assignment or
+webhook. Pause stopped the churn, and every managed lease reports successful
+cleanup. The admission correction checks the existing broker's readiness before
+claiming fresh queued work, preserves the input for later recovery, and leaves
+already-started reconciliation under its recorded execution contract. Current
+runtime-selection and dispatch authority checks stay in force. The patch still
+requires review, packaged deployment and a real recovery repeat.
 
 ## Candidate and release contract
 

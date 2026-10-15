@@ -76,6 +76,11 @@ outcome needs inspection and explicit recovery; it is never sent again automatic
 Saved work remains on the task if execution fails. Reverify after clearing an
 inspected recovery hold before admitting another assignment.
 
+New assignments remain in the durable queue while the Grok connection is
+unverified, revoked, or held for recovery. Readiness is checked before claiming
+a new run or allocating its Runner. Already-admitted session reconciliation
+keeps its recorded authority; it does not gain permission to start new work.
+
 **Stop Paperclip work** immediately revokes the session's Paperclip authority and
 stops future dispatch. Remote Grok execution may continue. Open the Grok Bot app
 to inspect it. Paperclip shows reported activity, not a complete remote transcript
