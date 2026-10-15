@@ -2891,6 +2891,7 @@ export { HUMAN_TASK_ORIGIN_KINDS, isAgentCreatedIssue, type IssueCreationSourceF
 export * from "./grok-bot.js";
 
 export {
+  CORRECTIVE_SILENT_NOTIFY_OVERRIDE,
   SILENT_NOTIFY_DISPOSITION_OVERRIDE,
   buildRoutineRunBrief,
   deriveNotifyPolicyFromDescription,

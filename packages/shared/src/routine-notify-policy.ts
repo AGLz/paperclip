@@ -5,6 +5,15 @@ import { ROUTINE_NOTIFY_POLICIES } from "./constants.js";
 export const SILENT_NOTIFY_DISPOSITION_OVERRIDE =
   "notify policy silent afeta apenas a notificação humana; registre sempre a disposição.";
 
+/**
+ * Corrective handoff override (R2 / AGL-239). Placed at the top of the
+ * `successful_run_missing_state` prompt so it wins over a silent routine brief
+ * that would otherwise make the agent answer `[SILENT]` again without a disposition.
+ * Does not edit the stored routine brief — only the corrective wake instruction.
+ */
+export const CORRECTIVE_SILENT_NOTIFY_OVERRIDE =
+  "Você deve registrar uma disposição mesmo quando a política de notificação da rotina é silent.";
+
 const PROSE_SILENT_RE = /notify\s*policy\s*:\s*silent/i;
 
 export function isRoutineNotifyPolicy(value: unknown): value is RoutineNotifyPolicy {
