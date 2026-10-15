@@ -64,7 +64,7 @@ starting harnesses; past passing evidence does not qualify this change.
 
 ## Current state
 
-- Branch: `codex/native-runner-recovery`, based on `7ec6fd0972`.
+- Branch: `codex/native-runner-recovery`, based on `afe5b3418d`.
 - Canonical workspace: this branch's isolated checkout.
 - Existing local Codex quiescent-state recovery deliberately excludes remote
   targets. Remote prior-run validation currently requires a verified suspended
@@ -82,9 +82,16 @@ starting harnesses; past passing evidence does not qualify this change.
   the current runner source and a deterministic fake Codex provider, not Daytona
   or a live model. Initial fixture failures (database bindings, TLS/port setup,
   and missing lease/coordinator records) were repaired before this result.
-- Full workspace typecheck passed. The required complete test suite is running;
-  build, review, staging qualification, old-state recovery, and live task recovery
-  remain outstanding.
+- Full workspace typecheck and build passed before the rebase. The first complete
+  test run was interrupted to incorporate two newly merged ownership fixes;
+  validation is restarting on the combined candidate. Review, staging
+  qualification, old-state recovery, and live task recovery remain outstanding.
+- The base includes #16432 (idle expiry serialized with admission) and #16441
+  (exact warm-owner run identity independent of configuration changes). These
+  fix live-controller handoffs. Remote suspension remains necessary for the
+  selected release because a lost controller has no in-memory owner. Each
+  remote follow-up starts a provider process with saved conversation history;
+  this costs startup latency and does not preserve same-process warm reuse.
 - The GLM run recorded a hard restart and `reattach_remote_runner`, followed by
   a generic identity-unavailable error. Its inspector does not retain the failed
   probe reason. This does not prove process death or a conflicting owner.
