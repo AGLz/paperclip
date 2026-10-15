@@ -13,6 +13,7 @@ import {
   isSuccessfulRunHandoffValidPathSkip,
   isPluginManagedIssueLifecycle,
   isSuccessfulRunHandoffRequiredNoticeBody,
+  shouldResolveSilentRoutineHandoffExhaustionAsDone,
   noticeMetadataReferencesRecoveryAction,
 } from "./successful-run-handoff.js";
 import { UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON } from "@paperclipai/adapter-utils/server-utils";
@@ -684,4 +685,64 @@ describe("successful run handoff decision", () => {
     expect(isSuccessfulRunHandoffRequiredNoticeBody("## This issue still needs a next step\n\nold body")).toBe(true);
     expect(isSuccessfulRunHandoffRequiredNoticeBody("Unrelated comment")).toBe(false);
   });
+
+  describe("shouldResolveSilentRoutineHandoffExhaustionAsDone (R3)", () => {
+    it("resolves silent routine_execution exhaustion as done", () => {
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution", unblockDescriptor: null },
+          notifyPolicy: "silent",
+        }),
+      ).toBe(true);
+    });
+
+    it("keeps alert/always exhaustion on the blocked path", () => {
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "alert",
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "always",
+        }),
+      ).toBe(false);
+    });
+
+    it("keeps real blocked paths (blockers, interaction, unblockDescriptor)", () => {
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "silent",
+          hasExplicitBlockerPath: true,
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "routine_execution" },
+          notifyPolicy: "silent",
+          hasPendingInteractionOrApproval: true,
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: {
+            originKind: "routine_execution",
+            unblockDescriptor: { owner: { agentId: "a" }, action: "fix harbor" },
+          },
+          notifyPolicy: "silent",
+        }),
+      ).toBe(false);
+      expect(
+        shouldResolveSilentRoutineHandoffExhaustionAsDone({
+          issue: { originKind: "manual" },
+          notifyPolicy: "silent",
+        }),
+      ).toBe(false);
+    });
+  });
+
+
 });

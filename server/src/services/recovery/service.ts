@@ -44,8 +44,10 @@ import {
   PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
   ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
   requiresExecutionReconciliation,
+  resolveRoutineNotifyPolicy,
   type IssueCommentMetadata,
   type IssueCommentPresentation,
+  type RoutineNotifyPolicy,
 } from "@paperclipai/shared";
 import {
   agents,
@@ -130,9 +132,12 @@ import {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
   FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
+  SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY,
   buildSuccessfulRunHandoffExhaustedNotice,
+  buildSuccessfulRunHandoffSilentExhaustedDoneNotice,
   isPluginManagedIssueLifecycle,
   noticeMetadataReferencesRecoveryAction,
+  shouldResolveSilentRoutineHandoffExhaustionAsDone,
   type SuccessfulRunHandoffNotice,
 } from "./successful-run-handoff.js";
 import {
@@ -3967,6 +3972,175 @@ export function recoveryService(
     return scheduled ? "queued" : "skipped";
   }
 
+
+  /**
+   * R3: silent routine_execution handoff exhaustion closes as `done`.
+   * Returns `resolved` | `ineligible` | `skipped` (write failed / raced).
+   */
+  async function tryResolveSilentRoutineHandoffExhaustion(input: {
+    issue: typeof issues.$inferSelect;
+    latestRun: LatestIssueRun;
+    handoffEvidence: SuccessfulRunHandoffRecoveryEvidence;
+  }): Promise<"resolved" | "ineligible" | "skipped"> {
+    const notifyPolicy = await resolveNotifyPolicyForRoutineIssue(
+      input.issue,
+      input.latestRun,
+    );
+    const blockerIds = await existingUnresolvedBlockerIssueIds(
+      input.issue.companyId,
+      input.issue.id,
+    );
+    const [pendingInteraction, pendingApproval] = await Promise.all([
+      db
+        .select({ id: issueThreadInteractions.id })
+        .from(issueThreadInteractions)
+        .where(
+          and(
+            eq(issueThreadInteractions.companyId, input.issue.companyId),
+            eq(issueThreadInteractions.issueId, input.issue.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ),
+        )
+        .limit(1),
+      db
+        .select({ id: approvals.id })
+        .from(issueApprovals)
+        .innerJoin(approvals, eq(approvals.id, issueApprovals.approvalId))
+        .where(
+          and(
+            eq(issueApprovals.companyId, input.issue.companyId),
+            eq(issueApprovals.issueId, input.issue.id),
+            eq(approvals.companyId, input.issue.companyId),
+            inArray(approvals.status, ["pending", "revision_requested"]),
+          ),
+        )
+        .limit(1),
+    ]);
+
+    if (
+      !shouldResolveSilentRoutineHandoffExhaustionAsDone({
+        issue: input.issue,
+        notifyPolicy,
+        hasExplicitBlockerPath: blockerIds.length > 0,
+        hasPendingInteractionOrApproval:
+          pendingInteraction.length > 0 || pendingApproval.length > 0,
+      })
+    ) {
+      return "ineligible";
+    }
+
+    const updated = await issuesSvc.update(input.issue.id, { status: "done" });
+    if (!updated) return "skipped";
+
+    const active = await recoveryActionsSvc.getActiveForIssue(
+      input.issue.companyId,
+      input.issue.id,
+    );
+    if (active) {
+      await recoveryActionsSvc.resolveActiveForIssue({
+        companyId: input.issue.companyId,
+        sourceIssueId: input.issue.id,
+        actionId: active.id,
+        status: "resolved",
+        outcome: "restored",
+        resolutionNote: "silent_routine_handoff_exhausted_done",
+      });
+    }
+
+    const hasDoneNotice = await db
+      .select({ id: issueComments.id, body: issueComments.body })
+      .from(issueComments)
+      .where(
+        and(
+          eq(issueComments.issueId, input.issue.id),
+          eq(issueComments.authorType, "system"),
+        ),
+      )
+      .orderBy(desc(issueComments.createdAt))
+      .limit(20)
+      .then((rows) =>
+        rows.some(
+          (row) =>
+            (row.body ?? "") ===
+            SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY,
+        ),
+      );
+
+    if (!hasDoneNotice) {
+      const notice = buildSuccessfulRunHandoffSilentExhaustedDoneNotice({
+        issue: input.issue,
+        sourceRunId: input.handoffEvidence.sourceRunId,
+        correctiveRunId: input.handoffEvidence.correctiveRunId,
+        missingDisposition: input.handoffEvidence.missingDisposition,
+      });
+      await issuesSvc.addComment(input.issue.id, notice.body, {}, {
+        authorType: "system",
+        presentation: notice.presentation,
+        metadata: notice.metadata,
+      });
+    }
+
+    await logActivity(db, {
+      companyId: input.issue.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: null,
+      runId: null,
+      action: "issue.successful_run_handoff_silent_resolved",
+      entityType: "issue",
+      entityId: input.issue.id,
+      details: {
+        identifier: input.issue.identifier,
+        status: "done",
+        previousStatus: "in_progress",
+        source: "recovery.reconcile_successful_run_handoff_silent_done",
+        notifyPolicy: "silent",
+        sourceRunId: input.handoffEvidence.sourceRunId,
+        correctiveRunId: input.handoffEvidence.correctiveRunId,
+        missingDisposition: input.handoffEvidence.missingDisposition,
+      },
+    });
+
+    return "resolved";
+  }
+
+  async function resolveNotifyPolicyForRoutineIssue(
+    issue: typeof issues.$inferSelect,
+    latestRun: LatestIssueRun,
+  ): Promise<RoutineNotifyPolicy | null> {
+    if (issue.originKind !== "routine_execution") return null;
+
+    const context = parseObject(latestRun?.contextSnapshot);
+    const fromContext = context.notifyPolicy;
+    if (
+      fromContext === "silent" ||
+      fromContext === "alert" ||
+      fromContext === "always"
+    ) {
+      return fromContext;
+    }
+
+    if (!issue.originId) return null;
+    const [row] = await db
+      .select({
+        notifyPolicy: routines.notifyPolicy,
+        description: routines.description,
+      })
+      .from(routines)
+      .where(
+        and(
+          eq(routines.id, issue.originId),
+          eq(routines.companyId, issue.companyId),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    return resolveRoutineNotifyPolicy({
+      notifyPolicy: row.notifyPolicy as RoutineNotifyPolicy | null | undefined,
+      description: row.description,
+    });
+  }
+
   async function escalateStrandedAssignedIssue(input: {
     issue: typeof issues.$inferSelect;
     previousStatus: StrandedPreviousStatus;
@@ -4425,6 +4599,7 @@ export function recoveryService(
       successfulContinuationObserved: 0,
       orphanBlockersAssigned: 0,
       successfulRunHandoffEscalated: 0,
+      successfulRunHandoffSilentResolved: 0,
       successfulRunHandoffRetried: 0,
       reviewParticipantRequeued: 0,
       escalated: 0,
@@ -4543,18 +4718,25 @@ export function recoveryService(
       }
 
       if (latestRun?.status === "succeeded" && issue.status !== "in_review") {
-        const [source] = await db.select({ runtimeMode: heartbeatRuns.runtimeMode }).from(heartbeatRuns).where(eq(heartbeatRuns.id, latestRun.id)).limit(1);
-        if (source?.runtimeMode !== "native") {
-          const outcome = await reconcileLegacyContinuation(latestRun.id);
-          if (outcome === "queued") {
-            result.continuationRequeued += 1;
-            result.dispositionRepairRequeued += 1;
-            result.issueIds.push(issue.id);
-          } else if (outcome === "escalated") {
-            result.escalated += 1;
-            result.issueIds.push(issue.id);
-          } else result.skipped += 1;
-          continue;
+        // Exhausted successful-run handoff (incl. silent R3 → done) owns the
+        // next step. Do not short-circuit into legacy continuation or the
+        // handoff path below never runs for the real zombie case: a succeeded
+        // corrective run that still left no disposition.
+        const exhaustedHandoff = isExhaustedSuccessfulRunHandoff(latestRun);
+        if (!(exhaustedHandoff && exhaustedHandoff.exhausted)) {
+          const [source] = await db.select({ runtimeMode: heartbeatRuns.runtimeMode }).from(heartbeatRuns).where(eq(heartbeatRuns.id, latestRun.id)).limit(1);
+          if (source?.runtimeMode !== "native") {
+            const outcome = await reconcileLegacyContinuation(latestRun.id);
+            if (outcome === "queued") {
+              result.continuationRequeued += 1;
+              result.dispositionRepairRequeued += 1;
+              result.issueIds.push(issue.id);
+            } else if (outcome === "escalated") {
+              result.escalated += 1;
+              result.issueIds.push(issue.id);
+            } else result.skipped += 1;
+            continue;
+          }
         }
       }
 
@@ -5382,6 +5564,22 @@ export function recoveryService(
             result.issueIds.push(issue.id);
             continue;
           }
+        }
+
+        // R3 / AGL-240: silent routine exhaustion → done, never board-blocked.
+        const silentResolved = await tryResolveSilentRoutineHandoffExhaustion({
+          issue,
+          latestRun,
+          handoffEvidence,
+        });
+        if (silentResolved === "resolved") {
+          result.successfulRunHandoffSilentResolved += 1;
+          result.issueIds.push(issue.id);
+          continue;
+        }
+        if (silentResolved === "skipped") {
+          result.skipped += 1;
+          continue;
         }
 
         const updated = await escalateStrandedAssignedIssue({

@@ -1582,6 +1582,7 @@ async function startServerWithDatabaseTeardown(
           reconciled.dispatchRequeued > 0 ||
           reconciled.continuationRequeued > 0 ||
           reconciled.successfulRunHandoffEscalated > 0 ||
+          reconciled.successfulRunHandoffSilentResolved > 0 ||
           reconciled.successfulRunHandoffRetried > 0 ||
           reconciled.escalated > 0
         ) {
@@ -1815,6 +1816,7 @@ async function startServerWithDatabaseTeardown(
                 reconciled.dispatchRequeued > 0 ||
                 reconciled.continuationRequeued > 0 ||
                 reconciled.successfulRunHandoffEscalated > 0 ||
+                reconciled.successfulRunHandoffSilentResolved > 0 ||
                 reconciled.successfulRunHandoffRetried > 0 ||
                 reconciled.escalated > 0
               ) {
