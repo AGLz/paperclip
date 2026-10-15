@@ -35,6 +35,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import {
+  canonicalNativeRuntimeContextDigest,
   CURSOR_DISTRIBUTION_PINS,
   QUALIFIED_ACPX_PROFILES,
   acpxRuntimeSessionDirectoryName,
@@ -5158,7 +5159,7 @@ type LeaseCoordinator = {
 };
 
 function leaseDb(
-  boundExecution: NativeExecutionInputV1 = execution,
+  boundExecution: NativeExecutionInput = execution,
   coordinatorOverrides: Partial<LeaseCoordinator> = {},
   runResultJson: Record<string, unknown> = {},
   updates: Array<{ table: unknown; values: Record<string, unknown> }> = [],
@@ -7906,6 +7907,86 @@ describe("native warm session supervision", () => {
     }
   });
 
+  it.each(["idle expiry first", "turn first"])("serializes idle expiry and turn admission: %s", async (order) => {
+    const stateBase = await mkdtemp(join(tmpdir(), "paperclip-idle-race-"));
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    process.env.PAPERCLIP_HOME = stateBase;
+    let finishClose!: () => void;
+    const closing = new Promise<void>((resolve) => { finishClose = resolve; });
+    const close = vi.fn(() => closing);
+    const idleTimeoutMs = 200;
+    try {
+      const first = {
+        ...execution,
+        binding: {
+          ...execution.binding,
+          runId: "run-idle-race-first",
+          executionWorkspaceId: "workspace-idle-race",
+        },
+        session: {
+          ...execution.session,
+          normalizedSessionId: "session-idle-race",
+          lifecyclePolicy: { mode: "warm" as const, idleTimeoutMs },
+        },
+      } as NativeExecutionInputV1;
+      const result = {
+        result: { summary: "completed" },
+        terminal: { runTerminalState: "succeeded" },
+        turnId: "turn-idle-race",
+        normalizedSessionId: first.session.normalizedSessionId,
+        providerSessionId: "provider-idle-race",
+        driverKind: "test",
+        driverVersion: "1",
+        nativeEventCount: 1,
+        highestContiguousSourceSeq: 1,
+        usage: null,
+      };
+      state.execute.mockReset().mockImplementationOnce(async (options) => {
+        await options.onSession?.({ close });
+        return result;
+      });
+      await executePaperclipNativeSession({
+        db: leaseDb(first), execution: first,
+        runnerInstanceId: "runner-idle-race", useRunnerd: true,
+      });
+      const second = { ...first, binding: { ...first.binding, runId: "run-idle-race-second" } };
+      const reachedAdmission = new Error("test reached post-checkpoint admission");
+      state.stageNativeRunnerWakeAttachments.mockClear();
+      state.stageNativeRunnerWakeAttachments.mockImplementationOnce(async () => {
+        if (order === "turn first") {
+          // The idle window elapses while the continuation still prepares.
+          await new Promise((resolve) => setTimeout(resolve, idleTimeoutMs * 2));
+          expect(close).not.toHaveBeenCalled();
+        }
+        throw reachedAdmission;
+      });
+      if (order === "idle expiry first") {
+        await vi.waitFor(() => expect(close).toHaveBeenCalledOnce(), { timeout: 2_000 });
+      }
+      const continuation = executePaperclipNativeSession({
+        db: leaseDb(second), execution: second,
+        runnerInstanceId: "runner-idle-race", useRunnerd: true,
+      }).catch((error) => error);
+      if (order === "idle expiry first") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(state.stageNativeRunnerWakeAttachments).not.toHaveBeenCalled();
+        finishClose();
+      }
+      expect(await continuation).toBe(reachedAdmission);
+      expect(state.stageNativeRunnerWakeAttachments).toHaveBeenCalledOnce();
+      // A deferred idle owner still retires once the scope is released.
+      await vi.waitFor(() => expect(close).toHaveBeenCalledExactlyOnceWith({
+        reason: "warm native session idle timeout",
+      }), { timeout: 2_000 });
+    } finally {
+      finishClose();
+      await closeIdleWarmNativeSessionsForRestart();
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      await rm(stateBase, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])("checkpoints a busy warm session on release after the restart sweep: checkpoint fails=%s", async (checkpointFails) => {
     const checkpointError = new Error("restart checkpoint failed");
     let finishCheckpoint!: () => void;
@@ -9647,7 +9728,7 @@ describe("runnerd provider runtime wiring", () => {
     };
   }
 
-  function priorNativeRunDb(priorExecution: NativeExecutionInputV1, status = "succeeded"): Db {
+  function priorNativeRunDb(priorExecution: NativeExecutionInput, status = "succeeded"): Db {
     return {
       select: () => ({ from: () => ({ where: () => ({ limit: async () => [{
         status,
@@ -9656,7 +9737,7 @@ describe("runnerd provider runtime wiring", () => {
     } as unknown as Db;
   }
 
-  async function initializeScopedRunnerRoot(current: NativeExecutionInputV1, runnerInstanceId: string) {
+  async function initializeScopedRunnerRoot(current: NativeExecutionInput, runnerInstanceId: string) {
     state.createBackend.mockClear();
     state.createTransport.mockClear();
     await createRunnerdBackend({ db: leaseDb(current), execution: current, runnerInstanceId });
@@ -9689,6 +9770,107 @@ describe("runnerd provider runtime wiring", () => {
       process.env.PAPERCLIP_RUNNER_STATE_DIR = previousStateDirectory;
     }
     await rm(isolatedStateDirectory, { recursive: true, force: true });
+  });
+
+  it.each(["unchanged", "changed", "runtime-context", "retirement-failed", "stale-owner", "active-owner", "missing-owner", "foreign-environment"] as const)("rotates an owned warm remote runner before checking changed configuration: %s", async scenario => {
+    const first = { ...scopedNativeExecution(`warm-admission-${scenario}`),
+      schema: "paperclip.native-execution-input.v5" as const,
+      provider: { kind: "codex" as const, model: null, approvalPolicy: "never" as const },
+      executionMode: "default" as const, planningContext: null, runtimeContext: nativeRuntimeContextFixture() };
+    first.session.lifecyclePolicy = { mode: "warm", idleTimeoutMs: 60_000 };
+    const next = { ...first, binding: { ...first.binding, runId: `${first.binding.runId}-next` },
+      session: { ...first.session, lifecyclePolicy: { mode: "warm" as const, idleTimeoutMs: ["unchanged", "runtime-context", "stale-owner", "missing-owner"].includes(scenario) ? 60_000 : 90_000 } } };
+    if (scenario === "runtime-context") {
+      next.runtimeContext = { ...first.runtimeContext,
+        mcp: { ...first.runtimeContext.mcp, digest: "1".repeat(64) } };
+      next.runtimeContext.aggregateDigest = canonicalNativeRuntimeContextDigest(next.runtimeContext);
+    }
+    const environmentId = `warm-admission-${scenario}`;
+    const target = { kind: "remote" as const, transport: "sandbox" as const, environmentId,
+      remoteCwd: "/home/daytona/workspace", runner: { execute: vi.fn() } };
+    const identity = { runId: first.binding.runId, normalizedSessionId: first.session.normalizedSessionId,
+      runnerInstanceId: `runner-${scenario}`, environmentLeaseId: first.binding.executionWorkspaceId };
+    const root = await initializeScopedRunnerRoot(first, identity.runnerInstanceId);
+    await writeRunnerAuthority(root, identity, "ready");
+    const order: string[] = [];
+    let failRetirement = scenario === "retirement-failed";
+    const firstSession = { close: vi.fn(async () => {
+      order.push("retire");
+      if (failRetirement) throw new Error("retirement unconfirmed");
+      await writeRunnerAuthority(root, identity, "suspended");
+    }) };
+    const nextSession = { close: vi.fn(async () => undefined) };
+    const result = { result: { summary: "done" }, terminal: { runTerminalState: "succeeded" },
+      turnId: "turn", normalizedSessionId: first.session.normalizedSessionId,
+      providerSessionId: "provider", driverKind: "test", driverVersion: "1",
+      nativeEventCount: 1, highestContiguousSourceSeq: 1, usage: null };
+    state.execute.mockReset().mockImplementationOnce(async options => {
+      await options.onSession?.(firstSession);
+      return result;
+    }).mockImplementationOnce(async options => {
+      order.push("execute-next");
+      expect(options.existingSession).toBe(scenario === "unchanged" ? firstSession : undefined);
+      await options.onSession?.(scenario === "unchanged" ? firstSession : nextSession);
+      return result;
+    });
+    const older = { ...first, binding: { ...first.binding, runId: `${first.binding.runId}-older` } };
+    const nextDb = leaseDb(next);
+    const ordinarySelect = nextDb.select.bind(nextDb);
+    nextDb.select = ((fields?: Record<string, unknown>) => fields?.status === heartbeatRuns.status
+      && fields?.runnerProfileJson === heartbeatRuns.runnerProfileJson
+      ? priorNativeRunDb(scenario === "stale-owner" ? older : first, scenario === "active-owner" ? "running" : "succeeded").select(fields as never)
+      : ordinarySelect(fields as never)) as Db["select"];
+    try {
+      await executePaperclipNativeSession({ db: leaseDb(first), execution: first,
+        runnerInstanceId: identity.runnerInstanceId, useRunnerd: true, runnerExecutionTarget: target as never });
+      if (scenario === "stale-owner") await writeRunnerAuthority(root, { ...identity, runId: older.binding.runId }, "ready");
+      if (scenario === "missing-owner") {
+        await closeWarmNativeSessionsForEnvironment({ environmentId, reason: "fixture owner loss" });
+        await writeRunnerAuthority(root, identity, "ready");
+        order.length = 0;
+        firstSession.close.mockClear();
+      }
+      const continuation = executePaperclipNativeSession({ db: nextDb, execution: next,
+        runnerInstanceId: `runner-next-${scenario}`, useRunnerd: true,
+        runnerExecutionTarget: (scenario === "foreign-environment" ? { ...target, environmentId: `${environmentId}-other` } : target) as never });
+      if (["stale-owner", "active-owner", "missing-owner", "foreign-environment"].includes(scenario)) {
+        await expect(continuation).rejects.toThrow(scenario === "active-owner"
+          ? "prior_owner_active" : "prior_owner_terminal_state_indeterminate");
+        expect(state.execute).toHaveBeenCalledOnce();
+        expect(firstSession.close).not.toHaveBeenCalled();
+        expect(order).toEqual([]);
+      } else if (scenario === "retirement-failed") {
+        await expect(continuation).rejects.toThrow("retirement unconfirmed");
+        expect(state.execute).toHaveBeenCalledOnce();
+        expect(order).toEqual(["retire"]);
+      } else {
+        await expect(continuation).resolves.toMatchObject({ exitCode: 0 });
+        expect(order).toEqual(scenario === "unchanged" ? ["execute-next"] : ["retire", "execute-next"]);
+        if (scenario === "unchanged") {
+          await writeRunnerAuthority(root, { ...identity, runId: next.binding.runId }, "ready");
+          const third = { ...next, binding: { ...next.binding, runId: `${next.binding.runId}-third` } };
+          const thirdDb = leaseDb(third);
+          const thirdSelect = thirdDb.select.bind(thirdDb);
+          thirdDb.select = ((fields?: Record<string, unknown>) => fields?.status === heartbeatRuns.status
+            && fields?.runnerProfileJson === heartbeatRuns.runnerProfileJson
+            ? priorNativeRunDb(next).select(fields as never)
+            : thirdSelect(fields as never)) as Db["select"];
+          state.execute.mockImplementationOnce(async options => {
+            expect(options.existingSession).toBe(firstSession);
+            await options.onSession?.(firstSession);
+            return result;
+          });
+          await expect(executePaperclipNativeSession({ db: thirdDb, execution: third,
+            runnerInstanceId: `runner-third-${scenario}`, useRunnerd: true,
+            runnerExecutionTarget: target as never })).resolves.toMatchObject({ exitCode: 0 });
+          expect(firstSession.close).not.toHaveBeenCalled();
+          expect(state.execute).toHaveBeenCalledTimes(3);
+        }
+      }
+    } finally {
+      failRetirement = false;
+      await closeWarmNativeSessionsForEnvironment({ environmentId, reason: "test cleanup" });
+    }
   });
 
   it.each([

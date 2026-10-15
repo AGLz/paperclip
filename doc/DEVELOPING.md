@@ -1892,6 +1892,14 @@ Only successful turns retain a live warm provider session. A structured failed
 or cancelled result must retire that session and collect its managed files before
 heartbeat stops the reusable sandbox. A later retry can resume the same sandbox
 without inheriting the stopped provider transport.
+
+An idle warm owner proves only the exact prior run in the same company, session,
+workspace and environment. Mutable configuration compatibility is checked
+separately: changed settings retire the owned provider before a replacement can
+execute. A copied older owner record, an active or missing owner, and a different
+environment cannot use this in-memory proof. Database terminal status alone is
+not proof that an unsuspended remote runner can be adopted.
+
 The shared lease-release boundary rechecks the durable run status for recovery
 and ordinary teardown. Successful workspace copy-back alone must not keep a
 failed turn's sandbox running.
