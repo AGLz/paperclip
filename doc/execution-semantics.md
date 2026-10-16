@@ -87,7 +87,7 @@ Entering `blocked` requires a routable waiting path. An issue may transition int
 - a pending issue-thread interaction or linked approval that names the responder
 - a structured unblock descriptor naming `{owner, action}`, where `owner` is an agent id, user id, or the board, and `action` is the concrete step that unblocks the issue
 
-When a structured unblock descriptor is the waiting path, Paperclip immediately notifies the named owner: an agent owner gets a wake, a user or board owner gets an inbox notification. Prose-only blocked — free-text that names an owner or action in a comment without any of the paths above — routes to nobody. It is rejected at the API or auto-classified as `needs_attention` with a board notification, never silently accepted as a healthy waiting state.
+When a structured unblock descriptor is the waiting path, Paperclip immediately notifies the named owner (**R6**): an agent owner gets a wake (`issue_unblock_requested`); a user or board owner gets an explicit `request_confirmation` interaction (and the usual attention inbox surface). Prose-only blocked — free-text that names an owner or action in a comment without any of the paths above — routes to nobody. It is rejected at the API or auto-classified as `needs_attention` with a board notification, never silently accepted as a healthy waiting state.
 
 Ordinary task questions are current input waits only while they still belong to
 the current human direction. A newer non-deleted human message on the same task
@@ -387,6 +387,45 @@ Every later caller of the compatibility decomposition API for the same accepted-
 Concurrent compatibility decomposition attempts are therefore idempotent relative to the fingerprint. Creating multiple child trees through that API for the same `(sourceIssueId, acceptedPlanRevisionId)` pair is a product bug.
 
 ## 8. Non-Terminal Issue Liveness Contract
+
+### Routine-execution silent notify and disposition exhaustion
+
+Routine `notifyPolicy` is a typed field (`silent` | `alert` | `always`), not prose in
+`description`. **R1:** `silent` suppresses human notification only — every successful
+routine run must still record a terminal disposition. The run brief for `silent`
+routines always includes the override:
+
+> notify policy silent afeta apenas a notificação humana; registre sempre a disposição.
+
+Legacy descriptions that say `Notify policy: silent` are backfilled via
+`scripts/backfill-routine-notify-policy.sql`. See issue AGL-236 / plan AGL-199.
+
+**R2:** When a successful run ends without a disposition, the corrective
+`successful_run_missing_state` handoff prompt prepends an override *before* any
+quoted routine brief:
+
+> Você deve registrar uma disposição mesmo quando a política de notificação da rotina é silent.
+
+That override is mandatory when the source routine's typed `notifyPolicy` is
+`silent`. The stored routine brief is left intact — only the corrective wake
+instruction carries the override. See issue AGL-239.
+
+**R3:** When a `routine_execution` issue with typed `notifyPolicy === silent`
+exhausts the successful-run disposition handoff (`successful_run_missing_state`
+after the bounded corrective attempt) **and** the source run succeeded, Paperclip
+resolves the issue **`done`**, never `blocked`. Silent notify is not a waiting
+path. `blocked` still requires one of: a first-class blocker chain, a pending
+interaction/approval that names a responder, or an `unblockDescriptor` with
+`{owner, action}`. Alert/always routines keep the existing board escalation on
+exhaustion. See issue AGL-240.
+
+**R4:** Resolving a disposition recovery (`missing_disposition` /
+`deliberate_wait_without_target`) on a `routine_execution` issue means **choosing
+a disposition** — typically `outcome: false_positive` with
+`sourceIssueStatus: done`. That path must not require a first-class blocker the
+routine never had. Resolving with `outcome: blocked` still requires an unresolved
+first-class blocker (real dependency dispositions). See issue AGL-241; CTO
+decision recorded on AGL-651.
 
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 

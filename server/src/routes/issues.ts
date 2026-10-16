@@ -224,6 +224,10 @@ import {
   isReviewPathRecoveryIdempotencyConflict,
   REVIEW_PATH_RECOVERY_INSTRUCTION,
 } from "../services/recovery/review-path-recovery.js";
+import {
+  isRoutineDispositionFalsePositiveDoneResolution,
+  recoveryBlockedOutcomeRequiresFirstClassBlocker,
+} from "../services/recovery/routine-disposition-recovery.js";
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
@@ -344,7 +348,7 @@ import {
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
-import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
+import { notifyUnblockDescriptorOwner } from "../services/notify-unblock-descriptor.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -9923,7 +9927,21 @@ export function issueRoutes(
         }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
-        if (outcome === "blocked" && sourceStatusChanged) {
+        // R4 (AGL-241 / CTO AGL-651): disposition recoveries on routine_execution
+        // resolve via false_positive → done without inventing blockers. That path
+        // never enters this gate. outcome === "blocked" still always requires one.
+        const routineDispositionCleanup = isRoutineDispositionFalsePositiveDoneResolution({
+          kind: activeRecoveryAction.kind,
+          cause: activeRecoveryAction.cause,
+          sourceOriginKind: lockedIssue.originKind,
+          outcome,
+          sourceIssueStatus,
+        });
+        if (
+          !routineDispositionCleanup &&
+          recoveryBlockedOutcomeRequiresFirstClassBlocker(outcome) &&
+          sourceStatusChanged
+        ) {
           const unresolvedBlockers = await tx
             .select({ id: issueRows.id })
             .from(issueRelations)
@@ -14656,27 +14674,20 @@ export function issueRoutes(
         publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
 
-      if (enteringBlocked) {
-        const blockedIssue = issue;
-        let ownerNotifiedAt: Date | null = null;
-        await deliverAgentUnblockNotification({
-          issue: blockedIssue,
+      // R6: any prospective blocked issue with a named unblockDescriptor must
+      // wake the owner (agent) or open an explicit board/user confirmation.
+      if (
+        issue.status === "blocked" &&
+        issue.unblockDescriptor &&
+        !issue.blockedOwnerNotifiedAt
+      ) {
+        const { blockedOwnerNotifiedAt } = await notifyUnblockDescriptorOwner({
+          db,
+          issue,
           wakeup: heartbeat.wakeup,
-          markNotified: async (blockedOwnerNotifiedAt) => {
-            ownerNotifiedAt = blockedOwnerNotifiedAt;
-          },
         });
-        if (ownerNotifiedAt) {
-          await db
-            .update(issueRows)
-            .set({ blockedOwnerNotifiedAt: ownerNotifiedAt })
-            .where(
-              and(
-                eq(issueRows.id, blockedIssue.id),
-                eq(issueRows.companyId, blockedIssue.companyId),
-              ),
-            );
-          issue = { ...blockedIssue, blockedOwnerNotifiedAt: ownerNotifiedAt };
+        if (blockedOwnerNotifiedAt) {
+          issue = { ...issue, blockedOwnerNotifiedAt };
         }
       }
 
