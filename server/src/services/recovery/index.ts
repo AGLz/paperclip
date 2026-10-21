@@ -63,6 +63,11 @@ export {
   noticeMetadataReferencesRecoveryAction,
   shouldResolveSilentRoutineHandoffExhaustionAsDone,
 } from "./successful-run-handoff.js";
+export {
+  isRoutineDispositionFalsePositiveDoneResolution,
+  isRoutineDispositionRecovery,
+  recoveryBlockedOutcomeRequiresFirstClassBlocker,
+} from "./routine-disposition-recovery.js";
 export type {
   SuccessfulRunHandoffNotice,
   SuccessfulRunHandoffDecision,

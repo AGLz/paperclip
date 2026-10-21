@@ -224,6 +224,10 @@ import {
   isReviewPathRecoveryIdempotencyConflict,
   REVIEW_PATH_RECOVERY_INSTRUCTION,
 } from "../services/recovery/review-path-recovery.js";
+import {
+  isRoutineDispositionFalsePositiveDoneResolution,
+  recoveryBlockedOutcomeRequiresFirstClassBlocker,
+} from "../services/recovery/routine-disposition-recovery.js";
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
@@ -9923,7 +9927,21 @@ export function issueRoutes(
         }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
-        if (outcome === "blocked" && sourceStatusChanged) {
+        // R4 (AGL-241 / CTO AGL-651): disposition recoveries on routine_execution
+        // resolve via false_positive → done without inventing blockers. That path
+        // never enters this gate. outcome === "blocked" still always requires one.
+        const routineDispositionCleanup = isRoutineDispositionFalsePositiveDoneResolution({
+          kind: activeRecoveryAction.kind,
+          cause: activeRecoveryAction.cause,
+          sourceOriginKind: lockedIssue.originKind,
+          outcome,
+          sourceIssueStatus,
+        });
+        if (
+          !routineDispositionCleanup &&
+          recoveryBlockedOutcomeRequiresFirstClassBlocker(outcome) &&
+          sourceStatusChanged
+        ) {
           const unresolvedBlockers = await tx
             .select({ id: issueRows.id })
             .from(issueRelations)
