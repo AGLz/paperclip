@@ -388,6 +388,20 @@ Concurrent compatibility decomposition attempts are therefore idempotent relativ
 
 ## 8. Non-Terminal Issue Liveness Contract
 
+### Routine-execution silent notify and disposition exhaustion
+
+Routine `notifyPolicy` is a typed field (`silent` | `alert` | `always`), not prose in
+`description`. **R1:** `silent` suppresses human notification only — every successful
+routine run must still record a terminal disposition. The run brief for `silent`
+routines always includes the override:
+
+> notify policy silent afeta apenas a notificação humana; registre sempre a disposição.
+
+Legacy descriptions that say `Notify policy: silent` are backfilled via
+`scripts/backfill-routine-notify-policy.sql`. See issue AGL-236 / plan AGL-199.
+
+
+
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 
 This is a visibility contract, not an auto-completion contract. If Paperclip cannot safely infer the next action, it should surface the ambiguity with a blocked state, a visible notice, or an explicit recovery action. It must not silently mark work done from prose comments or guess that a dependency is complete.
