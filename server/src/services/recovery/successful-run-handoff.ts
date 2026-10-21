@@ -25,10 +25,37 @@ export const SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY =
   "Paperclip needs a disposition before this issue can continue.";
 export const SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY =
   "Paperclip could not resolve this issue's missing disposition automatically. The source assignment is unchanged and a board decision is required.";
+/** R3 / AGL-240: silent routine exhaustion closes as done, not board-blocked. */
+export const SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY =
+  "Paperclip closed this silent routine execution as done after the disposition handoff exhausted without a recorded disposition. Silent notify policy is not a blocker — a successful routine run with no remaining work path resolves done.";
 export const LEGACY_SUCCESSFUL_RUN_HANDOFF_NOTICE_PREFIXES = [
   "## This issue still needs a next step",
   "## Successful run missing issue disposition",
 ] as const;
+
+
+/**
+ * R3: when a `routine_execution` issue with typed `notifyPolicy === silent`
+ * exhausts the successful-run disposition handoff, resolve `done` — never
+ * `blocked`. Real blockers (first-class edges, pending interaction/approval,
+ * or a named `unblockDescriptor`) still require `blocked`.
+ */
+export function shouldResolveSilentRoutineHandoffExhaustionAsDone(input: {
+  issue: {
+    originKind?: string | null;
+    unblockDescriptor?: unknown;
+  };
+  notifyPolicy?: RoutineNotifyPolicy | null;
+  hasExplicitBlockerPath?: boolean;
+  hasPendingInteractionOrApproval?: boolean;
+}): boolean {
+  if (input.issue.originKind !== "routine_execution") return false;
+  if (input.notifyPolicy !== "silent") return false;
+  if (input.hasExplicitBlockerPath) return false;
+  if (input.hasPendingInteractionOrApproval) return false;
+  if (input.issue.unblockDescriptor != null) return false;
+  return true;
+}
 
 export const SUCCESSFUL_RUN_HANDOFF_OPTIONS = [
   "mark_done_or_cancelled",
@@ -243,6 +270,46 @@ export function buildSuccessfulRunHandoffExhaustedNotice(input: {
             keyValueRow("Latest handoff run status", input.latestHandoffRunStatus),
             keyValueRow("Normalized cause", SUCCESSFUL_RUN_MISSING_STATE_REASON),
             keyValueRow("Missing disposition", input.missingDisposition),
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/** R3 / AGL-240: silent routine handoff exhaustion closed as done. */
+export function buildSuccessfulRunHandoffSilentExhaustedDoneNotice(input: {
+  issue: NoticeIssue;
+  sourceRunId: string | null;
+  correctiveRunId: string | null;
+  missingDisposition: string;
+}): SuccessfulRunHandoffNotice {
+  return {
+    body: SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY,
+    presentation: systemNoticePresentation({
+      tone: "info",
+      title: "Silent routine closed as done",
+    }),
+    metadata: {
+      version: 1,
+      sourceRunId: input.sourceRunId,
+      sections: [
+        {
+          title: "Resolution",
+          rows: [
+            issueLinkRow("Source issue", input.issue),
+            keyValueRow("Notify policy", "silent"),
+            keyValueRow("Resolution", "done"),
+            keyValueRow("Reason", "silent_routine_handoff_exhausted"),
+            keyValueRow("Missing disposition", input.missingDisposition),
+          ],
+        },
+        {
+          title: "Run evidence",
+          rows: [
+            keyValueRow("Source run", input.sourceRunId ?? "unknown"),
+            keyValueRow("Corrective handoff run", input.correctiveRunId ?? "unknown"),
+            keyValueRow("Normalized cause", SUCCESSFUL_RUN_MISSING_STATE_REASON),
           ],
         },
       ],

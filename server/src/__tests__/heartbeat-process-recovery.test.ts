@@ -94,6 +94,7 @@ import {
   plugins,
   projects,
   projectWorkspaces,
+  routines,
   statusDecisionEffects,
   statusDecisions,
   toolApplications,
@@ -268,6 +269,7 @@ import {
 import { secretService } from "../services/secrets.ts";
 import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
+  SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
   noticeMetadataReferencesRecoveryAction,
@@ -773,6 +775,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       // attempt so a late insert cannot hold the agents foreign key.
       await db.delete(agentWakeupRequests);
       await db.delete(agentRuntimeState);
+      // R3 fixtures insert routines that reference assigneeAgentId.
+      await db.delete(routines);
       try {
         await db.delete(agents);
         break;
@@ -6947,6 +6951,195 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         (event) => event.action === "issue.successful_run_handoff_escalated",
       ),
     ).toBe(true);
+  });
+
+
+  it("resolves exhausted silent routine handoff as done (R3), not blocked", async () => {
+    const { companyId, agentId, runId, issueId } =
+      await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+      });
+    const routineId = randomUUID();
+    const sourceRunId = randomUUID();
+    await db.insert(routines).values({
+      id: routineId,
+      companyId,
+      title: "Silent ingest",
+      description: "Se OK: responder exactamente [SILENT].",
+      notifyPolicy: "silent",
+      assigneeAgentId: agentId,
+      status: "active",
+    });
+    await db
+      .update(issues)
+      .set({
+        originKind: "routine_execution",
+        originId: routineId,
+      })
+      .where(eq(issues.id, issueId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "finish_successful_run_handoff",
+          sourceRunId,
+          resumeFromRunId: sourceRunId,
+          handoffRequired: true,
+          handoffReason: "successful_run_missing_state",
+          missingDisposition: "clear_next_step",
+          handoffAttempt: 1,
+          maxHandoffAttempts: 1,
+          notifyPolicy: "silent",
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.successfulRunHandoffEscalated).toBe(0);
+    expect(result.successfulRunHandoffSilentResolved).toBe(1);
+    expect(result.escalated).toBe(0);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const sourceIssue = await selectRecoveryIssueById(issueId);
+    expect(sourceIssue?.status).toBe("done");
+
+    const activeRecovery = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(
+        and(
+          eq(issueRecoveryActions.sourceIssueId, issueId),
+          eq(issueRecoveryActions.status, "active"),
+        ),
+      );
+    expect(activeRecovery).toHaveLength(0);
+
+    const comments = await selectRecoveryCommentsForIssue(issueId);
+    expect(comments[0]?.body).toBe(
+      SUCCESSFUL_RUN_HANDOFF_SILENT_EXHAUSTED_DONE_NOTICE_BODY,
+    );
+    expect(comments[0]?.authorType).toBe("system");
+
+    const activity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, issueId));
+    expect(
+      activity.some(
+        (event) =>
+          event.action === "issue.successful_run_handoff_silent_resolved",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps alert routine handoff exhaustion on blocked board path", async () => {
+    const { companyId, agentId, runId, issueId } =
+      await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+      });
+    const routineId = randomUUID();
+    const sourceRunId = randomUUID();
+    await db.insert(routines).values({
+      id: routineId,
+      companyId,
+      title: "Alert ingest",
+      notifyPolicy: "alert",
+      assigneeAgentId: agentId,
+      status: "active",
+    });
+    await db
+      .update(issues)
+      .set({
+        originKind: "routine_execution",
+        originId: routineId,
+      })
+      .where(eq(issues.id, issueId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "finish_successful_run_handoff",
+          sourceRunId,
+          resumeFromRunId: sourceRunId,
+          handoffRequired: true,
+          handoffReason: "successful_run_missing_state",
+          missingDisposition: "clear_next_step",
+          handoffAttempt: 1,
+          maxHandoffAttempts: 1,
+          notifyPolicy: "alert",
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.successfulRunHandoffSilentResolved).toBe(0);
+    expect(result.successfulRunHandoffEscalated).toBe(1);
+
+    const sourceIssue = await selectRecoveryIssueById(issueId);
+    expect(sourceIssue?.status).toBe("blocked");
+  });
+
+  it("keeps silent routine with unblockDescriptor on blocked path", async () => {
+    const { companyId, agentId, runId, issueId } =
+      await seedStrandedIssueFixture({
+        status: "in_progress",
+        runStatus: "succeeded",
+      });
+    const routineId = randomUUID();
+    const sourceRunId = randomUUID();
+    await db.insert(routines).values({
+      id: routineId,
+      companyId,
+      title: "Silent with credential gap",
+      notifyPolicy: "silent",
+      assigneeAgentId: agentId,
+      status: "active",
+    });
+    await db
+      .update(issues)
+      .set({
+        originKind: "routine_execution",
+        originId: routineId,
+        unblockDescriptor: {
+          owner: { agentId },
+          action: "rotate Harbor credential",
+        },
+      })
+      .where(eq(issues.id, issueId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "finish_successful_run_handoff",
+          sourceRunId,
+          resumeFromRunId: sourceRunId,
+          handoffRequired: true,
+          handoffReason: "successful_run_missing_state",
+          missingDisposition: "clear_next_step",
+          handoffAttempt: 1,
+          maxHandoffAttempts: 1,
+          notifyPolicy: "silent",
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.successfulRunHandoffSilentResolved).toBe(0);
+    expect(result.successfulRunHandoffEscalated).toBe(1);
+
+    const sourceIssue = await selectRecoveryIssueById(issueId);
+    expect(sourceIssue?.status).toBe("blocked");
   });
 
   it("retries an interrupted corrective successful-run handoff instead of escalating it", async () => {
