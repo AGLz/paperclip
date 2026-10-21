@@ -2790,6 +2790,10 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(actionAfter).toMatchObject({ status: "active", outcome: null });
   });
 
+  // Security control: outcome "blocked" without a first-class blocker stays rejected
+  // for real dependency types (issue_graph_liveness). Do not weaken this for R4 —
+  // R4 carve-out is false_positive → done on routine disposition recoveries only
+  // (CTO decision AGL-651 / AGL-241 / execution-semantics.md §8 R4).
   it("rejects blocked recovery resolution when the source issue has no first-class blockers", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const recoveryActionSvc = issueRecoveryActionService(db);
@@ -2831,6 +2835,81 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       resolvedAt: null,
     });
   });
+
+  // R4 / AGL-241 — CTO decision AGL-651 (2026-10-15): disposition recovery on
+  // routine_execution resolves with false_positive + done without a first-class
+  // blocker the routine never had. See doc/execution-semantics.md §8 R4.
+  it.each([
+    {
+      kind: "deliberate_wait_without_target" as const,
+      cause: "deliberate_wait_without_target" as const,
+      fingerprint: "disposition:routine-false-positive-done",
+    },
+    {
+      kind: "missing_disposition" as const,
+      cause: "successful_run_missing_issue_disposition" as const,
+      fingerprint: "missing-disposition:routine-false-positive-done",
+    },
+  ])(
+    "allows $kind false_positive → done on routine_execution without first-class blockers (R4)",
+    async ({ kind, cause, fingerprint }) => {
+      const { companyId, sourceIssueId } = await seedCompany();
+      const originId = randomUUID();
+      await db
+        .update(issues)
+        .set({
+          status: "blocked",
+          originKind: "routine_execution",
+          originId,
+        })
+        .where(eq(issues.id, sourceIssueId));
+      const recoveryActionSvc = issueRecoveryActionService(db);
+      const action = await recoveryActionSvc.upsertSourceScoped({
+        companyId,
+        sourceIssueId,
+        kind,
+        ownerType: "board",
+        ownerAgentId: null,
+        cause,
+        fingerprint,
+        evidence: { latestIssueStatus: "blocked" },
+        nextAction: "Record that the silent routine disposition was a false positive.",
+        wakePolicy: { type: "manual" },
+      });
+      const app = createApp();
+
+      const resolved = await request(app)
+        .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+        .send({
+          actionId: action.id,
+          outcome: "false_positive",
+          sourceIssueStatus: "done",
+          resolutionNote:
+            "R4: routine disposition recovery cleared without inventing blockers (CTO AGL-651).",
+        })
+        .expect(200);
+
+      expect(resolved.body.issue).toMatchObject({
+        id: sourceIssueId,
+        status: "done",
+        activeRecoveryAction: null,
+      });
+      expect(resolved.body.recoveryAction).toMatchObject({
+        id: action.id,
+        status: "resolved",
+        outcome: "false_positive",
+      });
+      expect(await recoveryActionSvc.getActiveForIssue(companyId, sourceIssueId)).toBeNull();
+      // Sanity: no blocker edges were invented for this cleanup.
+      const blockerEdges = await db
+        .select()
+        .from(issueRelations)
+        .where(
+          and(eq(issueRelations.relatedIssueId, sourceIssueId), eq(issueRelations.type, "blocks")),
+        );
+      expect(blockerEdges).toHaveLength(0);
+    },
+  );
 
   it("allows blocked recovery resolution when the source issue has an unresolved first-class blocker", async () => {
     const { companyId, managerId, sourceIssueId, prefix } = await seedCompany();

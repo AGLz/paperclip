@@ -775,6 +775,8 @@ async function materializeDecisionEffect(input: {
       .returning({ id: issues.id });
     if (!bound) throw new Error("native_blocker_binding_not_persisted");
     let wakeId: string | null = null;
+    let interactionId: string | null = null;
+    const idempotencyKey = `native-status:${input.decisionId}:blocker-owner`;
     if (effect.owner !== "board") {
       wakeId = await enqueueWake({
         tx: input.tx,
@@ -782,18 +784,47 @@ async function materializeDecisionEffect(input: {
         issueId: input.issue.id,
         agentId: effect.owner.agentId,
         reason: "issue_status_changed",
-        idempotencyKey: `native-status:${input.decisionId}:blocker-owner`,
+        idempotencyKey,
         payload: {
           nativeDecisionId: input.decisionId,
           unblockAction: effect.action,
         },
       });
+    } else {
+      // R6: board-owned unblockDescriptor needs an explicit confirmation path.
+      const { buildUnblockDescriptorConfirmation } = await import(
+        "../routable-blocked.js"
+      );
+      const interaction = await issueThreadInteractionService(input.tx).create(
+        { id: input.issue.id, companyId: input.companyId },
+        buildUnblockDescriptorConfirmation({
+          action: effect.action,
+          idempotencyKey,
+        }),
+        { systemId: "native-status-arbiter" },
+      );
+      interactionId = interaction.id;
     }
+    // Mark notified so later PATCH/recovery paths do not deliver a second R6 wake.
+    await input.tx
+      .update(issues)
+      .set({ blockedOwnerNotifiedAt: new Date() })
+      .where(
+        and(
+          eq(issues.id, input.issue.id),
+          eq(issues.companyId, input.companyId),
+        ),
+      );
     return {
       effectKind: effect.kind,
       targetType: "issue_unblock_descriptor",
       targetId: bound.id,
-      payload: { owner: effect.owner, action: effect.action, wakeId },
+      payload: {
+        owner: effect.owner,
+        action: effect.action,
+        wakeId,
+        interactionId,
+      },
     };
   }
   if (effect.kind === "schedule_retry") {
