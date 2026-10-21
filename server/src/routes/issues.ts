@@ -348,7 +348,7 @@ import {
 } from "../services/trust-preset-resolver.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
-import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
+import { notifyUnblockDescriptorOwner } from "../services/notify-unblock-descriptor.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -14674,27 +14674,20 @@ export function issueRoutes(
         publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
 
-      if (enteringBlocked) {
-        const blockedIssue = issue;
-        let ownerNotifiedAt: Date | null = null;
-        await deliverAgentUnblockNotification({
-          issue: blockedIssue,
+      // R6: any prospective blocked issue with a named unblockDescriptor must
+      // wake the owner (agent) or open an explicit board/user confirmation.
+      if (
+        issue.status === "blocked" &&
+        issue.unblockDescriptor &&
+        !issue.blockedOwnerNotifiedAt
+      ) {
+        const { blockedOwnerNotifiedAt } = await notifyUnblockDescriptorOwner({
+          db,
+          issue,
           wakeup: heartbeat.wakeup,
-          markNotified: async (blockedOwnerNotifiedAt) => {
-            ownerNotifiedAt = blockedOwnerNotifiedAt;
-          },
         });
-        if (ownerNotifiedAt) {
-          await db
-            .update(issueRows)
-            .set({ blockedOwnerNotifiedAt: ownerNotifiedAt })
-            .where(
-              and(
-                eq(issueRows.id, blockedIssue.id),
-                eq(issueRows.companyId, blockedIssue.companyId),
-              ),
-            );
-          issue = { ...blockedIssue, blockedOwnerNotifiedAt: ownerNotifiedAt };
+        if (blockedOwnerNotifiedAt) {
+          issue = { ...issue, blockedOwnerNotifiedAt };
         }
       }
 

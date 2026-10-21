@@ -1774,6 +1774,31 @@ export function recoveryService(
     if (repaired) {
       for (const publication of publications) publishActivity(publication);
       await executeIssuePostCommitActions(db, postCommitActions);
+      // R6: board-owned unblockDescriptor from native blocked wait must open a
+      // confirmation path — issuesSvc.update alone does not deliver wakes.
+      const blockedIssue = await db
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          status: issues.status,
+          unblockDescriptor: issues.unblockDescriptor,
+          blockedTransitionAt: issues.blockedTransitionAt,
+          blockedOwnerNotifiedAt: issues.blockedOwnerNotifiedAt,
+        })
+        .from(issues)
+        .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (blockedIssue?.unblockDescriptor) {
+        const { heartbeatService } = await import("../heartbeat.js");
+        const { notifyUnblockDescriptorOwner } = await import(
+          "../notify-unblock-descriptor.js"
+        );
+        await notifyUnblockDescriptorOwner({
+          db,
+          issue: blockedIssue,
+          wakeup: heartbeatService(db).wakeup,
+        });
+      }
     }
     return repaired;
   }

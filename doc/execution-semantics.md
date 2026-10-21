@@ -87,7 +87,7 @@ Entering `blocked` requires a routable waiting path. An issue may transition int
 - a pending issue-thread interaction or linked approval that names the responder
 - a structured unblock descriptor naming `{owner, action}`, where `owner` is an agent id, user id, or the board, and `action` is the concrete step that unblocks the issue
 
-When a structured unblock descriptor is the waiting path, Paperclip immediately notifies the named owner: an agent owner gets a wake, a user or board owner gets an inbox notification. Prose-only blocked — free-text that names an owner or action in a comment without any of the paths above — routes to nobody. It is rejected at the API or auto-classified as `needs_attention` with a board notification, never silently accepted as a healthy waiting state.
+When a structured unblock descriptor is the waiting path, Paperclip immediately notifies the named owner (**R6**): an agent owner gets a wake (`issue_unblock_requested`); a user or board owner gets an explicit `request_confirmation` interaction (and the usual attention inbox surface). Prose-only blocked — free-text that names an owner or action in a comment without any of the paths above — routes to nobody. It is rejected at the API or auto-classified as `needs_attention` with a board notification, never silently accepted as a healthy waiting state.
 
 Ordinary task questions are current input waits only while they still belong to
 the current human direction. A newer non-deleted human message on the same task
