@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CORRECTIVE_SILENT_NOTIFY_OVERRIDE,
   SILENT_NOTIFY_DISPOSITION_OVERRIDE,
   buildRoutineRunBrief,
   deriveNotifyPolicyFromDescription,
@@ -56,5 +57,11 @@ describe("routine notifyPolicy", () => {
     expect(resolveRoutineNotifyPolicy({
       description: "Notify policy: silent",
     })).toBe("silent");
+  });
+
+  it("exports R2 corrective override distinct from the brief override", () => {
+    expect(CORRECTIVE_SILENT_NOTIFY_OVERRIDE).toContain("disposição");
+    expect(CORRECTIVE_SILENT_NOTIFY_OVERRIDE).toContain("silent");
+    expect(CORRECTIVE_SILENT_NOTIFY_OVERRIDE).not.toBe(SILENT_NOTIFY_DISPOSITION_OVERRIDE);
   });
 });
