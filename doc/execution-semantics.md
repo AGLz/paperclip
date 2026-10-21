@@ -426,6 +426,13 @@ a disposition** — typically `outcome: false_positive` with
 routine never had. Resolving with `outcome: blocked` still requires an unresolved
 first-class blocker (real dependency dispositions). See issue AGL-241; CTO
 decision recorded on AGL-651.
+**R5:** A recovery action with `ownerType: board` that has **no** pending
+interaction or approval naming a human responder must not auto-retry on its own
+(the historical ~2 minute zombie loop). Paperclip applies a retry ceiling and
+expires the action with inspectable `recoveryBudget` evidence (`state:
+exhausted`, reason `board_without_named_responder`), clearing automatic
+wake/monitor paths. When a pending interaction or approval already names a
+responder, the current human-in-the-loop wait is preserved. See issue AGL-242.
 
 For agent-owned, non-terminal issues, Paperclip should never leave work in a state where nobody is responsible for the next move and nothing will wake or surface it.
 

@@ -160,6 +160,14 @@ import {
   DISPOSITION_REPAIR_MAX_ATTEMPTS,
 } from "./disposition-repair.js";
 import {
+  BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_NEXT_ACTION,
+  BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_REASON,
+  DEFAULT_BOARD_RECOVERY_WITHOUT_RESPONDER_MAX_ATTEMPTS,
+  buildBoardRecoveryWithoutResponderBudget,
+  decideBoardRecoveryRetryCeiling,
+  isBoardRecoveryBudgetExhausted,
+} from "./board-recovery-retry-ceiling.js";
+import {
   createActiveRunWatchdog,
   WatchdogDecisionApplicationError,
   type RunOutputSilenceSummary,
@@ -1226,6 +1234,104 @@ export function recoveryService(
       )
       .limit(1)
       .then((rows) => Boolean(rows[0]));
+  }
+
+  /** R5: pending interaction or approval counts as a named human responder. */
+  async function hasNamedHumanResponder(companyId: string, issueId: string) {
+    const [pendingInteraction, pendingApproval] = await Promise.all([
+      db
+        .select({ id: issueThreadInteractions.id })
+        .from(issueThreadInteractions)
+        .where(
+          and(
+            eq(issueThreadInteractions.companyId, companyId),
+            eq(issueThreadInteractions.issueId, issueId),
+            eq(issueThreadInteractions.status, "pending"),
+          ),
+        )
+        .limit(1),
+      db
+        .select({ id: approvals.id })
+        .from(issueApprovals)
+        .innerJoin(approvals, eq(approvals.id, issueApprovals.approvalId))
+        .where(
+          and(
+            eq(issueApprovals.companyId, companyId),
+            eq(issueApprovals.issueId, issueId),
+            eq(approvals.companyId, companyId),
+            inArray(approvals.status, ["pending", "revision_requested"]),
+          ),
+        )
+        .limit(1),
+    ]);
+    return pendingInteraction.length > 0 || pendingApproval.length > 0;
+  }
+
+  /**
+   * R5: board-owned recovery without a named responder expires with evidence
+   * instead of auto-retrying. Clears wake/monitor so sweeps cannot burn runs.
+   */
+  async function exhaustBoardRecoveryWithoutNamedResponder(input: {
+    action: {
+      id: string;
+      cause: string;
+      fingerprint: string;
+      attemptCount: number;
+      maxAttempts: number | null;
+      evidence: Record<string, unknown> | null;
+    };
+    cause?: string;
+  }) {
+    if (isBoardRecoveryBudgetExhausted(input.action.evidence ?? {})) {
+      return input.action;
+    }
+    const now = new Date();
+    const attemptsUsed = Math.max(
+      1,
+      input.action.attemptCount || DEFAULT_BOARD_RECOVERY_WITHOUT_RESPONDER_MAX_ATTEMPTS,
+    );
+    const maxAttempts =
+      input.action.maxAttempts && input.action.maxAttempts > 0
+        ? input.action.maxAttempts
+        : DEFAULT_BOARD_RECOVERY_WITHOUT_RESPONDER_MAX_ATTEMPTS;
+    const cause = input.cause ?? input.action.cause;
+    const [exhausted] = await db
+      .update(issueRecoveryActions)
+      .set({
+        status: "escalated",
+        ownerType: "board",
+        ownerAgentId: null,
+        ownerUserId: null,
+        evidence: {
+          ...(input.action.evidence ?? {}),
+          recoveryBudget: buildBoardRecoveryWithoutResponderBudget({
+            attemptsUsed,
+            maxAttempts,
+            cause,
+            fingerprint: input.action.fingerprint,
+            exhaustedAt: now.toISOString(),
+          }),
+        },
+        nextAction: BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_NEXT_ACTION,
+        wakePolicy: null,
+        monitorPolicy: null,
+        attemptCount: attemptsUsed,
+        maxAttempts,
+        timeoutAt: null,
+        lastAttemptAt: now,
+        outcome: "escalated",
+        resolutionNote: BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_REASON,
+        resolvedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(issueRecoveryActions.id, input.action.id),
+          inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        ),
+      )
+      .returning();
+    return exhausted ?? input.action;
   }
 
   /**
@@ -2567,6 +2673,15 @@ export function recoveryService(
     });
     const isProviderQuotaWait = recoveryCause === "provider_quota";
     const now = new Date();
+    const hasNamedResponder = isProviderQuotaWait
+      ? false
+      : await hasNamedHumanResponder(input.issue.companyId, input.issue.id);
+    const boardCeiling = isProviderQuotaWait
+      ? null
+      : decideBoardRecoveryRetryCeiling({
+          ownerType: "board",
+          hasNamedHumanResponder: hasNamedResponder,
+        });
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
       sourceIssueId: input.issue.id,
@@ -2650,9 +2765,28 @@ export function recoveryService(
       monitorPolicy: isProviderQuotaWait
         ? { type: "wait_recovery", retryAgentId: routing.returnOwnerAgentId }
         : null,
-      maxAttempts: null,
+      // R5: board holds without a named responder get a hard retry ceiling;
+      // pending interaction/approval keeps an open wait (maxAttempts null).
+      maxAttempts:
+        boardCeiling?.kind === "apply_ceiling" ? boardCeiling.maxAttempts : null,
       lastAttemptAt: now,
     });
+
+    if (
+      action.ownerType === "board" &&
+      boardCeiling?.kind === "apply_ceiling" &&
+      boardCeiling.exhaustImmediately
+    ) {
+      await exhaustBoardRecoveryWithoutNamedResponder({
+        action,
+      });
+      return (
+        (await recoveryActionsSvc.getActiveForIssue(
+          input.issue.companyId,
+          input.issue.id,
+        )) ?? action
+      );
+    }
 
     return action;
   }
@@ -3166,6 +3300,8 @@ export function recoveryService(
     }
 
     if (active && active.attemptCount >= input.attemptCount) return active;
+    // R5: never silently take a board-owned hold back for automatic agent retry.
+    if (active?.ownerType === "board") return active;
 
     return recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
@@ -3643,14 +3779,26 @@ export function recoveryService(
       legacyEpisode: input.legacyEpisode,
     });
     const now = new Date();
+    const hasResponder = await hasNamedHumanResponder(
+      input.issue.companyId,
+      input.issue.id,
+    );
+    const ceiling = decideBoardRecoveryRetryCeiling({
+      ownerType: "board",
+      hasNamedHumanResponder: hasResponder,
+    });
+    const applyCeiling = ceiling?.kind === "apply_ceiling";
+    const boardMaxAttempts = applyCeiling
+      ? ceiling.maxAttempts
+      : null;
     await db
       .update(issueRecoveryActions)
       .set({
-        status: "active",
+        status: applyCeiling ? "escalated" : "active",
         ownerType: "board",
         ownerAgentId: null,
         ownerUserId: null,
-        maxAttempts: null,
+        maxAttempts: boardMaxAttempts,
         evidence: {
           ...action.evidence,
           latestRunId: input.latestRun?.id ?? null,
@@ -3660,16 +3808,33 @@ export function recoveryService(
           sourceAttemptCount: input.attemptCount,
           sourceMaxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
           routingPolicy: STRANDED_BOARD_ESCALATION_POLICY,
+          ...(applyCeiling
+            ? {
+                recoveryBudget: buildBoardRecoveryWithoutResponderBudget({
+                  attemptsUsed: Math.max(1, input.attemptCount || boardMaxAttempts || 1),
+                  maxAttempts: boardMaxAttempts ?? DEFAULT_BOARD_RECOVERY_WITHOUT_RESPONDER_MAX_ATTEMPTS,
+                  cause: "deliberate_wait_without_target",
+                  fingerprint: input.fingerprint,
+                  exhaustedAt: now.toISOString(),
+                }),
+              }
+            : {}),
         },
-        nextAction:
-          "Inspect the evidence and choose whether to repair, retry the original owner, explicitly reassign, or resolve the source issue.",
-        wakePolicy: {
-          type: "board_escalation",
-          reason: input.terminalReason,
-          preservesSourceAssignee: true,
-        },
+        nextAction: applyCeiling
+          ? BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_NEXT_ACTION
+          : "Inspect the evidence and choose whether to repair, retry the original owner, explicitly reassign, or resolve the source issue.",
+        wakePolicy: applyCeiling
+          ? null
+          : {
+              type: "board_escalation",
+              reason: input.terminalReason,
+              preservesSourceAssignee: true,
+            },
         timeoutAt: null,
-        resolutionNote: input.terminalReason,
+        outcome: applyCeiling ? "escalated" : action.outcome,
+        resolutionNote: applyCeiling
+          ? BOARD_RECOVERY_WITHOUT_RESPONDER_EXHAUSTED_REASON
+          : input.terminalReason,
         updatedAt: now,
       })
       .where(
@@ -3913,6 +4078,30 @@ export function recoveryService(
       current.companyId,
       current.id,
     );
+    // R5: board-owned recovery must not reclaim the original owner for another
+    // blind disposition-repair wake when nobody is named to answer.
+    if (activeRepairAction?.ownerType === "board") {
+      const hasResponder = await hasNamedHumanResponder(
+        current.companyId,
+        current.id,
+      );
+      const ceiling = decideBoardRecoveryRetryCeiling({
+        ownerType: "board",
+        hasNamedHumanResponder: hasResponder,
+        maxAttempts: activeRepairAction.maxAttempts,
+      });
+      if (ceiling?.kind === "preserve_human_loop") return "skipped";
+      if (isBoardRecoveryBudgetExhausted(activeRepairAction.evidence ?? {})) {
+        return "skipped";
+      }
+      if (ceiling?.kind === "apply_ceiling") {
+        await exhaustBoardRecoveryWithoutNamedResponder({
+          action: activeRepairAction,
+        });
+        return "escalated";
+      }
+      return "skipped";
+    }
     // Budget admission may wait behind another recovery worker. Read the
     // execution paths after the persisted counter so a newly reserved
     // successor cannot be mistaken for permission to schedule the next one.
