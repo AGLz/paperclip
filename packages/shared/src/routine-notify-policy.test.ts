@@ -55,6 +55,10 @@ describe("routine notifyPolicy", () => {
       description: "Notify policy: silent",
     })).toBe("always");
     expect(resolveRoutineNotifyPolicy({
+      notifyPolicy: "alert",
+      description: "Notify policy: silent",
+    })).toBe("alert");
+    expect(resolveRoutineNotifyPolicy({
       description: "Notify policy: silent",
     })).toBe("silent");
   });
