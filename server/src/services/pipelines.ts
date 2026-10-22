@@ -26,6 +26,8 @@ import {
 import {
   extractRoutineVariableNames,
   isBuiltinRoutineVariable,
+  isRoutineNotifyPolicy,
+  resolveRoutineNotifyPolicy,
   syncRoutineVariablesWithTemplate,
   type EnvBinding,
   type PipelineAutomationRetryCleanupOptions,
@@ -1175,6 +1177,10 @@ function routineRevisionSnapshotRoutine(routine: typeof routines.$inferSelect): 
     status: routine.status as RoutineRevisionSnapshotV1["routine"]["status"],
     concurrencyPolicy: routine.concurrencyPolicy as RoutineRevisionSnapshotV1["routine"]["concurrencyPolicy"],
     catchUpPolicy: routine.catchUpPolicy as RoutineRevisionSnapshotV1["routine"]["catchUpPolicy"],
+    notifyPolicy: resolveRoutineNotifyPolicy({
+      notifyPolicy: isRoutineNotifyPolicy(routine.notifyPolicy) ? routine.notifyPolicy : null,
+      description: routine.description,
+    }),
     activityGatePolicy: routine.activityGatePolicy as RoutineRevisionSnapshotV1["routine"]["activityGatePolicy"],
     activityGateScope: routine.activityGateScope as RoutineRevisionSnapshotV1["routine"]["activityGateScope"],
     originKind: routine.originKind,

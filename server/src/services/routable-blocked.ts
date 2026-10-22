@@ -81,6 +81,7 @@ export function buildUnblockDescriptorConfirmation(input: {
       prompt: action,
       acceptLabel: "Unblocked",
       rejectLabel: "Still blocked",
+      allowDeclineReason: true,
       detailsMarkdown: `Named unblock action:\n\n${action}`,
     },
   };
@@ -124,7 +125,7 @@ export async function deliverAgentUnblockNotification(input: {
     return true;
   }
 
-  if (!("agentId" in owner)) return false;
+  if (!("agentId" in owner) || typeof owner.agentId !== "string") return false;
 
   await input.wakeup(owner.agentId, {
     source: "automation",
