@@ -2,7 +2,10 @@
 -- Default column value is 'alert'. Flip to 'silent' when description contains
 -- "Notify policy: silent" (case-insensitive).
 --
--- Safe to re-run. Does not rewrite description prose (Fase 3 owns brief override text).
+-- Legacy migration only: this can overwrite an explicit alert/always policy.
+-- Do not run on an already configured instance without a verified legacy-only
+-- candidate set. Preserve explicit typed policies; existing values win over prose.
+-- Does not rewrite description prose (Fase 3 owns brief override text).
 --
 -- Apply after migration 0347_routine_notify_policy:
 --   psql "$DATABASE_URL" -f scripts/backfill-routine-notify-policy.sql

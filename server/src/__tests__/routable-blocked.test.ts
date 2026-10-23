@@ -48,7 +48,7 @@ describe("routable blocked notifications", () => {
       kind: "request_confirmation",
       resolverPolicy: "human_only",
       continuationPolicy: "wake_assignee",
-      payload: { version: 1, prompt: "Approve the exception" },
+      payload: { version: 1, prompt: "Approve the exception", allowDeclineReason: true },
     });
   });
 

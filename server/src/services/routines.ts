@@ -84,6 +84,11 @@ import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { runtimePublicOrigin } from "./cloud-runtime-identity.js";
 
+// Service callers may omit the new field so legacy prose can still supply the policy.
+type CreateRoutineInput = Omit<CreateRoutine, "notifyPolicy"> & {
+  notifyPolicy?: CreateRoutine["notifyPolicy"];
+};
+
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
@@ -2211,7 +2216,7 @@ export function routineService(
 
     getDescriptionDocument: async (routineId: string) => getRoutineDescriptionDocument(routineId),
 
-    create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<Routine> => {
+    create: async (companyId: string, input: CreateRoutineInput, actor: Actor): Promise<Routine> => {
       await assertProject(companyId, input.projectId ?? null);
       await assertRoutineFolder(companyId, input.folderId ?? null);
       await assertAssignableAgent(db, companyId, input.assigneeAgentId ?? null, { kind: "routine" });
