@@ -152,6 +152,9 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # Grok's native executable stays an external sandbox prerequisite; this pack
 # contains only its launcher.
 FROM build AS runner-provider-pack
+# Nested Docker on ZFS cannot reliably reflink pnpm store files (EAGAIN).
+# Copy package bytes while preserving the qualified provider pack contents.
+ENV npm_config_package_import_method=copy
 # Unstamped local builds remain usable, but cannot qualify a remote pack.
 # Never invent a source revision to make an unqualified pack look verified.
 RUN mkdir -p /provider-pack \
